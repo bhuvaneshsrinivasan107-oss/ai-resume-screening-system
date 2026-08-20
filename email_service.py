@@ -664,31 +664,37 @@ def send_status_email(candidate_name, candidate_email, job_role, status):
 
 
 # ============================================================
-# TEST EMAIL
+# DIRECT CANDIDATE EMAIL
 # ============================================================
 
-def send_test_email(recipient):
-    """Send a test email to verify the email service works.
+def send_candidate_email(
+    candidate_name,
+    candidate_email,
+    subject,
+    message
+):
+    """Send a direct email to a candidate.
+
+    Recipient: the candidate's email stored in the
+    candidates database (never typed by the recruiter).
+
+    Sender: the recruiter's configured SENDER_EMAIL.
 
     Returns (success, message). Never raises.
     """
 
-    subject = "Test Email - AI Resume Screening System"
-
     body = (
-        "This is a test email from the AI Resume Screening "
-        "and Candidate Ranking System.\n\n"
-        "If you received this, the email service is "
-        "configured correctly.\n\n"
+        f"Dear {candidate_name},\n\n"
+        f"{message}\n\n"
         "Regards,\n"
         "AI Recruiter Team"
     )
 
     return send_email(
-        recipient,
+        candidate_email,
         subject,
         body,
-        event_type="Test Email"
+        event_type="Email to Candidate"
     )
 
 

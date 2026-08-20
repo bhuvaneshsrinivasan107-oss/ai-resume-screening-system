@@ -92,6 +92,97 @@ def apply_custom_css():
             background-color: #f7f9fc;
         }
 
+        /* ----------------------------------------------------
+           Modern professional background (AI Recruiter theme)
+           Soft gradient + gentle abstract glow shapes.
+           Visual styling only - no logic changes.
+        ---------------------------------------------------- */
+
+        [data-testid="stAppViewContainer"] {
+            background:
+                linear-gradient(
+                    135deg,
+                    #f4f7fd 0%,
+                    #eaeff9 45%,
+                    #eef3fa 100%
+                );
+        }
+
+        [data-testid="stAppViewContainer"]::before {
+            content: "";
+            position: fixed;
+            top: -18%;
+            right: -12%;
+            width: 55vw;
+            height: 55vw;
+            max-width: 720px;
+            max-height: 720px;
+            background: radial-gradient(
+                circle at center,
+                rgba(88, 118, 208, 0.14) 0%,
+                rgba(88, 118, 208, 0.0) 70%
+            );
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        [data-testid="stAppViewContainer"]::after {
+            content: "";
+            position: fixed;
+            bottom: -22%;
+            left: -14%;
+            width: 60vw;
+            height: 60vw;
+            max-width: 780px;
+            max-height: 780px;
+            background: radial-gradient(
+                circle at center,
+                rgba(64, 156, 196, 0.13) 0%,
+                rgba(64, 156, 196, 0.0) 70%
+            );
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        [data-testid="stAppViewContainer"] .block-container {
+            position: relative;
+            z-index: 1;
+        }
+
+        [data-testid="stSidebar"] {
+            background:
+                linear-gradient(
+                    180deg,
+                    #ffffff 0%,
+                    #f1f5fc 100%
+                );
+        }
+
+        [data-testid="stSidebar"] .block-container {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Soft glass-style surface for content cards */
+        [data-testid="stMetric"] {
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            border: 1px solid rgba(229, 233, 240, 0.9);
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+        }
+
+        .info-box {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+        }
+
         .main-header {
             font-size: 34px;
             font-weight: 800;
@@ -554,52 +645,174 @@ def _email_notifications_page():
     st.divider()
 
     # --------------------------------------------------------
-    # SEND TEST EMAIL
+    # SEND EMAIL TO CANDIDATE
     # --------------------------------------------------------
 
     st.markdown(
-        "### 📨 Send Test Email"
+        "### 📧 Send Email to Candidate"
     )
 
     st.caption(
-        "Send a test email to verify the email service."
+        "Send an email directly to the selected candidate "
+        "using the recruiter's configured email address."
     )
 
-    test_recipient = st.text_input(
-        "Recipient Email",
-        placeholder="Enter the recipient email address",
-        key="test_email_recipient"
-    )
+    try:
 
-    if st.button(
-        "📤 Send Test Email",
-        type="primary",
-        key="test_email_send_button"
-    ):
+        from database import get_candidates
 
-        if not test_recipient.strip():
+        candidates_df = get_candidates()
 
-            st.warning(
-                "⚠️ Please enter a recipient email address."
+        if candidates_df is None or candidates_df.empty:
+
+            st.info(
+                "No candidates available. Screen some resumes "
+                "first to send emails."
             )
 
         else:
 
-            with st.spinner(
-                "📨 Sending test email..."
-            ):
+            candidate_options = {}
 
-                ok, msg = email_service.send_test_email(
-                    test_recipient.strip()
+            for _, row in candidates_df.iterrows():
+
+                name = str(
+                    row.get("name", "Unknown Candidate")
                 )
 
-            if ok:
+                email = str(
+                    row.get("email", "")
+                )
 
-                st.success(f"📧 {msg}")
+                if "@" in email:
+
+                    label = f"{name} — {email}"
+
+                    if label not in candidate_options:
+
+                        candidate_options[label] = {
+                            "name": name,
+                            "email": email
+                        }
+
+            if not candidate_options:
+
+                st.info(
+                    "No candidates with a valid email address "
+                    "are available."
+                )
 
             else:
 
-                st.warning(f"📧 {msg}")
+                selected = st.selectbox(
+                    "Select Candidate",
+                    list(candidate_options.keys()),
+                    key="direct_email_candidate"
+                )
+
+                candidate_name = candidate_options[
+                    selected
+                ]["name"]
+
+                candidate_email = candidate_options[
+                    selected
+                ]["email"]
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    st.metric(
+                        "👤 Selected Candidate",
+                        candidate_name
+                    )
+
+                with col2:
+
+                    st.metric(
+                        "📧 Candidate Email",
+                        candidate_email
+                    )
+
+                subject = st.text_input(
+                    "📝 Subject",
+                    placeholder="Enter the email subject",
+                    key="direct_email_subject"
+                )
+
+                message = st.text_area(
+                    "✉️ Email Message",
+                    height=180,
+                    placeholder=(
+                        "Write your message to the candidate..."
+                    ),
+                    key="direct_email_message"
+                )
+
+                if st.button(
+                    "📧 Send Email to Candidate",
+                    type="primary",
+                    use_container_width=True,
+                    key="direct_email_send_button"
+                ):
+
+                    if not subject.strip():
+
+                        st.warning(
+                            "⚠️ Please enter a subject."
+                        )
+
+                    elif not message.strip():
+
+                        st.warning(
+                            "⚠️ Please enter the email message."
+                        )
+
+                    else:
+
+                        with st.spinner(
+                            "📨 Sending email..."
+                        ):
+
+                            ok, reason = (
+                                email_service.send_candidate_email(
+                                    candidate_name,
+                                    candidate_email,
+                                    subject.strip(),
+                                    message.strip()
+                                )
+                            )
+
+                        if ok:
+
+                            st.success(
+                                f"✅ Email sent successfully to "
+                                f"{candidate_name} "
+                                f"({candidate_email})"
+                            )
+
+                        else:
+
+                            st.error(
+                                "❌ Email could not be sent. "
+                                "Please check the SMTP "
+                                "configuration."
+                            )
+
+                            if reason and (
+                                reason
+                                != "Email service is not configured."
+                            ):
+
+                                st.caption(
+                                    f"ℹ️ Reason: {reason}"
+                                )
+
+    except Exception as e:
+
+        st.caption(
+            f"Candidate list unavailable: {e}"
+        )
 
     st.divider()
 
@@ -793,7 +1006,10 @@ def _email_notifications_page():
                     {
                         "Type": event_type,
                         "Candidate": candidate_name,
-                        "Recipient": recipient,
+                        "Candidate Email": recipient,
+                        "Subject": str(
+                            row.get("subject", "")
+                        ),
                         "Job Role": job_role,
                         "Date/Time": dt_display,
                         "Status": status_icon
