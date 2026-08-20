@@ -18,7 +18,8 @@ from auth import authentication, logout
 
 from resume_parser import (
     extract_text,
-    extract_candidate_details
+    extract_candidate_details,
+    extract_skills
 )
 
 from ranking_engine import rank_candidate
@@ -293,6 +294,31 @@ Important:
 # SIDEBAR
 # ============================================================
 
+def clean_display_name(name):
+    """Remove a leading 'Demo' word from seeded account names.
+
+    Only affects the visible label - the stored database
+    value (used for login) is left untouched.
+    """
+
+    if not name:
+        return name
+
+    name = str(name).strip()
+
+    for prefix in ("Demo ", "demo "):
+
+        if name.startswith(prefix):
+
+            cleaned = name[len(prefix):].strip()
+
+            if cleaned:
+
+                return cleaned
+
+    return name
+
+
 def show_sidebar():
 
     with st.sidebar:
@@ -307,9 +333,11 @@ def show_sidebar():
 
         st.divider()
 
-        user_name = st.session_state.get(
-            "name",
-            "User"
+        user_name = clean_display_name(
+            st.session_state.get(
+                "name",
+                "User"
+            )
         )
 
         user_role = st.session_state.get(
@@ -359,7 +387,8 @@ def show_sidebar():
                 """
                 - 👤 My Profile
                 - 📊 Screening Result
-                - 🚀 AI Tools
+                - 🤖 AI Interview Simulator
+                - 📝 AI Resume Improvement
                 """
             )
 
@@ -410,8 +439,7 @@ def extra_features_header():
         </div>
 
         <div class="main-subtitle">
-            Interview scheduling, email notifications,
-            AI interview practice, resume improvement
+            Interview scheduling, email notifications
             and multi-language parsing - all inside
             the same application.
         </div>
@@ -426,8 +454,6 @@ def recruiter_ai_tools():
         [
             "📅 Interview Scheduler",
             "📧 Email Notifications",
-            "🤖 AI Interview Simulator",
-            "✨ AI Resume Improvement",
             "🌐 Multi-language Resume Parsing"
         ]
     )
@@ -441,14 +467,6 @@ def recruiter_ai_tools():
         _email_notifications_page()
 
     with tabs[2]:
-
-        ai_interview.show()
-
-    with tabs[3]:
-
-        resume_improvement.show()
-
-    with tabs[4]:
 
         multilingual_parser.show()
 
@@ -493,11 +511,101 @@ def _email_notifications_page():
 
     st.divider()
 
-    if not email_service.email_configured():
+    # --------------------------------------------------------
+    # EMAIL SERVICE STATUS CARD
+    # --------------------------------------------------------
 
-        st.caption(
-            "Email service is not configured."
-        )
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        if email_service.email_configured():
+
+            st.metric(
+                "SMTP Status",
+                "🟢 Configured"
+            )
+
+        else:
+
+            st.metric(
+                "SMTP Status",
+                "🔴 Not Configured"
+            )
+
+    with col2:
+
+        sender = email_service.get_sender_email()
+
+        if sender:
+
+            st.metric(
+                "Sender",
+                sender
+            )
+
+        else:
+
+            st.metric(
+                "Sender",
+                "Not configured"
+            )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # SEND TEST EMAIL
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### 📨 Send Test Email"
+    )
+
+    st.caption(
+        "Send a test email to verify the email service."
+    )
+
+    test_recipient = st.text_input(
+        "Recipient Email",
+        placeholder="Enter the recipient email address",
+        key="test_email_recipient"
+    )
+
+    if st.button(
+        "📤 Send Test Email",
+        type="primary",
+        key="test_email_send_button"
+    ):
+
+        if not test_recipient.strip():
+
+            st.warning(
+                "⚠️ Please enter a recipient email address."
+            )
+
+        else:
+
+            with st.spinner(
+                "📨 Sending test email..."
+            ):
+
+                ok, msg = email_service.send_test_email(
+                    test_recipient.strip()
+                )
+
+            if ok:
+
+                st.success(f"📧 {msg}")
+
+            else:
+
+                st.warning(f"📧 {msg}")
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # NOTIFICATION LOG
+    # --------------------------------------------------------
 
     st.markdown(
         "### 📜 Notification Log"
@@ -505,11 +613,83 @@ def _email_notifications_page():
 
     try:
 
-        from database import get_notifications
+        from database import (
+            get_notifications,
+            get_candidate_by_email
+        )
 
-        log_rows = get_notifications(limit=20)
+        log_rows = get_notifications(limit=200)
 
         if log_rows:
+
+            # ------------------------------------------------
+            # FILTER OPTIONS
+            # ------------------------------------------------
+
+            status_options = [
+                "All",
+                "Sent",
+                "Failed",
+                "Skipped"
+            ]
+
+            type_options = ["All"]
+
+            for row in log_rows:
+
+                event_type = str(
+                    row.get("event_type", "")
+                ).strip()
+
+                if event_type and event_type not in type_options:
+
+                    type_options.append(event_type)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                filter_status = st.selectbox(
+                    "Filter by Status",
+                    status_options,
+                    key="log_filter_status"
+                )
+
+            with col2:
+
+                filter_type = st.selectbox(
+                    "Filter by Type",
+                    type_options,
+                    key="log_filter_type"
+                )
+
+            # ------------------------------------------------
+            # RESOLVE CANDIDATE NAME + JOB ROLE FROM DB
+            # ------------------------------------------------
+
+            def _lookup_candidate(email):
+
+                try:
+
+                    records = get_candidate_by_email(email)
+
+                    if records:
+
+                        record = records[0]
+
+                        return str(
+                            record.get("name", "")
+                        ), str(
+                            record.get("job_role", "")
+                        )
+
+                except Exception:
+
+                    pass
+
+                return "", ""
+
+            table_rows = []
 
             for row in log_rows:
 
@@ -517,76 +697,122 @@ def _email_notifications_page():
                     row.get("status", "Failed")
                 )
 
-                if status == "Sent":
-
-                    icon = "✅"
-
-                else:
-
-                    icon = "❌"
-
-                event_name = str(
+                event_type = str(
                     row.get("event_type", "")
-                ).strip()
-
-                if not event_name:
-
-                    event_name = "Notification"
-
-                subject = str(
-                    row.get("subject", "")
-                )
-
-                role_part = ""
-
-                if " - " in subject:
-
-                    _, _, role_part = (
-                        subject.partition(" - ")
-                    )
-
-                role_part = role_part.strip()
-
-                if not role_part:
-
-                    role_part = event_name
+                ).strip() or "Notification"
 
                 recipient = str(
                     row.get("recipient", "")
                 )
 
-                if status == "Sent":
+                if (
+                    filter_status != "All"
+                    and status != filter_status
+                ):
 
-                    result_line = (
-                        f"Sent: {row.get('created_at', '')}"
-                    )
+                    continue
 
-                else:
+                if (
+                    filter_type != "All"
+                    and event_type != filter_type
+                ):
 
-                    message = str(
-                        row.get("message", "")
-                    ).strip()
+                    continue
 
-                    if message and message != "None":
-
-                        result_line = (
-                            f"Failed: {message}"
-                        )
-
-                    else:
-
-                        result_line = (
-                            f"Failed: "
-                            f"{row.get('created_at', '')}"
-                        )
-
-                st.markdown(
-                    f"{icon} **{event_name}**  \n"
-                    f"{role_part} → {recipient}  \n"
-                    f"{result_line}"
+                subject = str(
+                    row.get("subject", "")
                 )
 
-                st.divider()
+                role_from_subject = ""
+
+                if " - " in subject:
+
+                    _, _, role_from_subject = (
+                        subject.partition(" - ")
+                    )
+
+                role_from_subject = role_from_subject.strip()
+
+                candidate_name = ""
+
+                job_role = ""
+
+                if "@" in recipient:
+
+                    candidate_name, job_role = (
+                        _lookup_candidate(recipient)
+                    )
+
+                if not candidate_name:
+
+                    candidate_name = (
+                        recipient or "Unknown"
+                    )
+
+                if not job_role:
+
+                    job_role = role_from_subject
+
+                created_at = str(
+                    row.get("created_at", "")
+                )
+
+                date_part = (
+                    created_at.split(" ")[0]
+                    if created_at
+                    else ""
+                )
+
+                time_part = (
+                    created_at.split(" ")[1]
+                    if created_at and " " in created_at
+                    else ""
+                )
+
+                dt_display = ""
+
+                if date_part:
+
+                    dt_display = email_service.format_date(
+                        date_part
+                    )
+
+                if time_part:
+
+                    dt_display += (
+                        f", {email_service.format_time(time_part)}"
+                    )
+
+                status_icon = {
+                    "Sent": "✅ Sent",
+                    "Failed": "❌ Failed",
+                    "Skipped": "🟡 Skipped"
+                }.get(status, status)
+
+                table_rows.append(
+                    {
+                        "Type": event_type,
+                        "Candidate": candidate_name,
+                        "Recipient": recipient,
+                        "Job Role": job_role,
+                        "Date/Time": dt_display,
+                        "Status": status_icon
+                    }
+                )
+
+            if table_rows:
+
+                st.dataframe(
+                    pd.DataFrame(table_rows),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            else:
+
+                st.info(
+                    "No notifications match the selected filters."
+                )
 
         else:
 
@@ -837,8 +1063,13 @@ def resume_screening():
                 try:
 
                     ranking_result = rank_candidate(
-                        candidate,
-                        job_description
+                        candidate.get(
+                            "skills",
+                            []
+                        ),
+                        extract_skills(
+                            job_description
+                        )
                     )
 
                 except TypeError:
@@ -850,7 +1081,9 @@ def resume_screening():
                                 "skills",
                                 []
                             ),
-                            job_description
+                            extract_skills(
+                                job_description
+                            )
                         )
 
                     except Exception:
@@ -1025,18 +1258,49 @@ def candidate_table(df):
 
     search = st.text_input(
         "🔎 Search Candidate",
-        placeholder="Search by name, email or skill..."
+        placeholder="Search by name, email or job role..."
     )
 
-    status_filter = st.selectbox(
-        "Filter by Status",
-        [
-            "All",
-            "Approved",
-            "Pending",
-            "Rejected"
-        ]
-    )
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        status_filter = st.selectbox(
+            "Filter by Status",
+            [
+                "All",
+                "Approved",
+                "Pending",
+                "Rejected"
+            ]
+        )
+
+    with col2:
+
+        job_roles = [
+            "All"
+        ] + sorted(
+            df["job_role"]
+            .astype(str)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        job_role_filter = st.selectbox(
+            "Filter by Job Role",
+            job_roles
+        )
+
+    with col3:
+
+        min_score = st.slider(
+            "Minimum Match Score",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=5
+        )
 
     filtered_df = df.copy()
 
@@ -1056,7 +1320,7 @@ def candidate_table(df):
                 ).lower()
                 or
                 search_lower in str(
-                    row.get("skills", "")
+                    row.get("job_role", "")
                 ).lower(),
                 axis=1
             )
@@ -1069,6 +1333,31 @@ def candidate_table(df):
             ==
             status_filter
         ]
+
+    if job_role_filter != "All":
+
+        filtered_df = filtered_df[
+            filtered_df["job_role"]
+            .astype(str)
+            ==
+            job_role_filter
+        ]
+
+    filtered_df = filtered_df[
+        filtered_df["score"] >= min_score
+    ]
+
+    if filtered_df.empty:
+
+        st.info(
+            "No candidates match the selected filters."
+        )
+
+        return
+
+    st.caption(
+        f"Showing {len(filtered_df)} candidate(s)."
+    )
 
     columns = [
         "id",
@@ -1191,60 +1480,95 @@ def candidate_details(df):
 
     st.divider()
 
-    col1, col2, col3 = st.columns(3)
+    status_value = str(
+        candidate_data.get(
+            "status",
+            "Pending"
+        )
+    )
+
+    status_badge = {
+        "Approved": "🟢 Approved",
+        "Pending": "🟡 Pending",
+        "Rejected": "🔴 Rejected"
+    }.get(
+        status_value,
+        status_value
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
 
         st.metric(
-            "AI Match Score",
+            "🎯 AI Match Score",
             f"{float(candidate_data['score']):.1f}%"
         )
 
     with col2:
 
         st.metric(
-            "Status",
-            candidate_data["status"]
+            "📊 Application Status",
+            status_badge
         )
 
     with col3:
 
         st.metric(
-            "Job Role",
-            candidate_data["job_role"]
+            "💼 Job Role",
+            candidate_data.get(
+                "job_role",
+                ""
+            )
+        )
+
+    with col4:
+
+        st.metric(
+            "📱 Phone",
+            candidate_data.get(
+                "phone",
+                "Not Found"
+            )
         )
 
     st.divider()
 
-    left, right = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
-    with left:
+    with col1:
 
-        st.markdown(
-            "### 👤 Personal Information"
+        st.metric(
+            "👤 Candidate Name",
+            candidate_data.get(
+                "name",
+                "Unknown"
+            )
         )
 
-        st.write(
-            f"**Name:** {candidate_data['name']}"
+    with col2:
+
+        st.metric(
+            "📧 Email",
+            candidate_data.get(
+                "email",
+                ""
+            )
         )
 
-        st.write(
-            f"**Email:** {candidate_data['email']}"
+    with col3:
+
+        st.metric(
+            "📄 Resume",
+            candidate_data.get(
+                "filename",
+                ""
+            )
         )
 
-        st.write(
-            f"**Phone:** {candidate_data['phone']}"
-        )
-
-        st.write(
-            f"**Resume:** {candidate_data['filename']}"
-        )
-
-    with right:
-
-        st.markdown(
-            "### 🧠 Skill Analysis"
-        )
+    with st.expander(
+        "🧠 Skill Analysis"
+    ):
 
         st.write(
             "**Matched Skills:**"
@@ -1501,15 +1825,13 @@ def candidate_details(df):
                 if ok:
 
                     st.success(
-                        "📧 Notification email sent to "
-                        f"{candidate_email}."
+                        f"📧 {message}"
                     )
 
                 else:
 
-                    st.info(
-                        "📧 Notification email not sent: "
-                        f"{message}"
+                    st.warning(
+                        f"📧 {message}"
                     )
 
             st.rerun()
@@ -1719,9 +2041,11 @@ def candidate_portal():
         ""
     )
 
-    candidate_name = st.session_state.get(
-        "name",
-        "Candidate"
+    candidate_name = clean_display_name(
+        st.session_state.get(
+            "name",
+            "Candidate"
+        )
     )
 
     st.markdown(

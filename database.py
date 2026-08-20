@@ -434,6 +434,43 @@ def create_database():
             except sqlite3.OperationalError:
                 pass
 
+    # --------------------------------------------------------
+    # Automatically upgrade the interviews table
+    # (adds missing columns without recreating the table)
+    # --------------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(interviews)"
+    )
+
+    interview_columns = {
+        row["name"]
+        for row in cursor.fetchall()
+    }
+
+    required_interview_columns = {
+
+        "interviewer": "TEXT DEFAULT ''"
+    }
+
+    for column, definition in (
+        required_interview_columns.items()
+    ):
+
+        if column not in interview_columns:
+
+            try:
+
+                cursor.execute(
+                    f"""
+                    ALTER TABLE interviews
+                    ADD COLUMN {column} {definition}
+                    """
+                )
+
+            except sqlite3.OperationalError:
+                pass
+
     conn.commit()
 
     conn.close()
@@ -943,7 +980,8 @@ def add_interview(
     location_or_link,
     duration,
     notes,
-    status="Scheduled"
+    status="Scheduled",
+    interviewer=""
 ):
 
     conn = get_connection()
@@ -967,9 +1005,10 @@ def add_interview(
             duration,
             notes,
             status,
+            interviewer,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         candidate_id,
         candidate_name,
@@ -982,6 +1021,7 @@ def add_interview(
         duration,
         notes,
         status,
+        interviewer,
         created_at
     ))
 
@@ -1070,7 +1110,8 @@ def update_interview(
     location_or_link,
     duration,
     notes,
-    status
+    status,
+    interviewer=""
 ):
 
     conn = get_connection()
@@ -1088,7 +1129,8 @@ def update_interview(
             location_or_link = ?,
             duration = ?,
             notes = ?,
-            status = ?
+            status = ?,
+            interviewer = ?
         WHERE id = ?
     """, (
         candidate_name,
@@ -1101,6 +1143,7 @@ def update_interview(
         duration,
         notes,
         status,
+        interviewer,
         interview_id
     ))
 
@@ -1251,7 +1294,7 @@ def get_interview_results(
 
     conn.close()
 
-    return rows
+    return [dict(row) for row in rows]
 
 
 # ============================================================
@@ -1316,7 +1359,10 @@ def get_notifications(limit=50):
 
     conn.close()
 
-    return rows
+    # sqlite3.Row does not provide .get() - convert to
+    # plain dicts so callers can safely use row["key"]
+    # or row.get("key") everywhere.
+    return [dict(row) for row in rows]
 
 
 # ============================================================

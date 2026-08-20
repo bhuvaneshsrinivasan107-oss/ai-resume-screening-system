@@ -188,6 +188,71 @@ def format_time(time_str):
 # CORE SEND
 # ============================================================
 
+def _friendly_error(error):
+    """Map an SMTP exception to a useful, safe message.
+
+    Never includes the password or raw credentials.
+    """
+
+    import socket
+
+    if isinstance(
+        error,
+        smtplib.SMTPAuthenticationError
+    ):
+
+        return "SMTP authentication failed (check SMTP_USERNAME and SMTP_PASSWORD)"
+
+    if isinstance(
+        error,
+        (
+            smtplib.SMTPConnectError,
+            ConnectionRefusedError,
+            socket.gaierror,
+            socket.timeout,
+            TimeoutError
+        )
+    ):
+
+        return "SMTP server connection failed (server unreachable or refused)"
+
+    if isinstance(
+        error,
+        smtplib.SMTPRecipientsRefused
+    ):
+
+        return "Recipient address is invalid or rejected by the server"
+
+    if isinstance(
+        error,
+        smtplib.SMTPSenderRefused
+    ):
+
+        return "Sender address was rejected by the server"
+
+    if isinstance(
+        error,
+        smtplib.SMTPServerDisconnected
+    ):
+
+        return "SMTP server disconnected unexpectedly"
+
+    if isinstance(
+        error,
+        ValueError
+    ):
+
+        return "SMTP configuration error (invalid server or port)"
+
+    return f"Email sending failed ({type(error).__name__})"
+
+
+def get_sender_email():
+    """Return the configured sender email (SENDER_EMAIL)."""
+
+    return _get_secret("SENDER_EMAIL")
+
+
 def send_email(to_email, subject, body, event_type="email"):
     """
     Send an email. Returns (success, message).
@@ -220,7 +285,21 @@ def send_email(to_email, subject, body, event_type="email"):
 
     if not to_email:
 
-        return False, "No recipient email address provided."
+        log_status(
+            "Failed",
+            "Recipient address is invalid"
+        )
+
+        return False, "Recipient address is invalid"
+
+    if "@" not in str(to_email):
+
+        log_status(
+            "Failed",
+            "Recipient address is invalid"
+        )
+
+        return False, "Recipient address is invalid"
 
     if not email_configured():
 
@@ -232,7 +311,7 @@ def send_email(to_email, subject, body, event_type="email"):
         )
 
         log_status(
-            "Failed",
+            "Skipped",
             "Email service is not configured."
         )
 
@@ -295,20 +374,20 @@ def send_email(to_email, subject, body, event_type="email"):
 
         log_status("Sent")
 
-        return True, "Email sent successfully."
+        return True, f"Email sent successfully to {to_email}"
 
     except Exception as e:
 
         logger.error("Email failed for %s: %s", to_email, e)
 
+        reason = _friendly_error(e)
+
         log_status(
             "Failed",
-            f"Email delivery failed ({type(e).__name__})"
+            reason
         )
 
-        return False, (
-            "Email could not be sent. Please try again later."
-        )
+        return False, reason
 
 
 def _template(candidate_name, details_lines, closing="Please be available at the scheduled time."):
@@ -347,6 +426,7 @@ def send_interview_scheduled_email(candidate_name, candidate_email, details):
 
     lines = (
         "Your interview has been scheduled.\n\n"
+        f"Candidate Name: {candidate_name}\n"
         f"Job Role: {details.get('job_role', 'Job Role')}\n"
         f"Interview Date: {format_date(details.get('interview_date'))}\n"
         f"Interview Time: {format_time(details.get('interview_time'))}\n"
@@ -357,13 +437,17 @@ def send_interview_scheduled_email(candidate_name, candidate_email, details):
 
         lines += f"Meeting/Interview Link: {details['location_or_link']}\n"
 
+    if details.get("interviewer"):
+
+        lines += f"Interviewer: {details['interviewer']}\n"
+
     if details.get("duration"):
 
         lines += f"Duration: {details['duration']} minutes\n"
 
     if details.get("notes"):
 
-        lines += f"Notes: {details['notes']}\n"
+        lines += f"Additional Instructions: {details['notes']}\n"
 
     return send_email(
         candidate_email,
@@ -394,6 +478,10 @@ def send_interview_rescheduled_email(candidate_name, candidate_email, details):
     if details.get("location_or_link"):
 
         lines += f"Meeting Link: {details['location_or_link']}\n"
+
+    if details.get("interviewer"):
+
+        lines += f"Interviewer: {details['interviewer']}\n"
 
     if details.get("notes"):
 
@@ -529,7 +617,7 @@ def send_status_email(candidate_name, candidate_email, job_role, status):
     """
 
     subject = (
-        f"Application Status Update - "
+        f"Application Update - "
         f"{job_role}"
     )
 
@@ -572,6 +660,35 @@ def send_status_email(candidate_name, candidate_email, job_role, status):
             closing=""
         ),
         event_type="Application Update"
+    )
+
+
+# ============================================================
+# TEST EMAIL
+# ============================================================
+
+def send_test_email(recipient):
+    """Send a test email to verify the email service works.
+
+    Returns (success, message). Never raises.
+    """
+
+    subject = "Test Email - AI Resume Screening System"
+
+    body = (
+        "This is a test email from the AI Resume Screening "
+        "and Candidate Ranking System.\n\n"
+        "If you received this, the email service is "
+        "configured correctly.\n\n"
+        "Regards,\n"
+        "AI Recruiter Team"
+    )
+
+    return send_email(
+        recipient,
+        subject,
+        body,
+        event_type="Test Email"
     )
 
 

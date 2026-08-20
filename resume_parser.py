@@ -635,7 +635,30 @@ def extract_skills(text):
 
     for skill in skill_dictionary:
 
-        if skill in text_lower:
+        # Short skills (e.g. "c", "c#") must appear as
+        # standalone words - otherwise "c" matches inside
+        # any word containing the letter (e.g. "excel").
+        if len(skill) <= 2:
+
+            pattern = (
+                r"(?<![A-Za-z0-9])"
+                + re.escape(skill)
+                + r"(?![A-Za-z0-9])"
+            )
+
+            present = (
+                re.search(
+                    pattern,
+                    text_lower
+                )
+                is not None
+            )
+
+        else:
+
+            present = skill in text_lower
+
+        if present:
 
             if skill not in found:
 

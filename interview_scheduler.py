@@ -18,7 +18,8 @@ from database import (
     update_interview,
     update_interview_status,
     delete_interview,
-    get_candidates
+    get_candidates,
+    get_candidate
 )
 
 from email_service import (
@@ -88,8 +89,55 @@ def _candidate_options():
     return options
 
 
+def _resolve_recipient(record):
+    """Return (name, email) using the candidate's CURRENT
+    database record (by candidate_id) as the source of truth.
+
+    The email ALWAYS comes from the candidates table - never
+    a hardcoded or placeholder address. Falls back to the
+    stored interview values only if the candidate record
+    cannot be found.
+    """
+
+    name = record.get("candidate_name", "Candidate")
+
+    email = record.get("candidate_email", "")
+
+    try:
+
+        candidate = get_candidate(
+            int(record.get("candidate_id", 0) or 0)
+        )
+
+        if candidate:
+
+            db_email = str(
+                candidate.get("email", "")
+            ).strip()
+
+            if "@" in db_email:
+
+                email = db_email
+
+            name = str(
+                candidate.get("name", name)
+            ).strip() or name
+
+    except Exception:
+
+        pass
+
+    return name, email
+
+
 def _send_emails(record, email_type):
-    """Send the relevant email and show the result."""
+    """Send the relevant email and show the result.
+
+    Returns (success, message) so callers can count
+    real successes and failures.
+    """
+
+    candidate_name, candidate_email = _resolve_recipient(record)
 
     details = {
         "job_role": record.get("job_role", ""),
@@ -98,65 +146,88 @@ def _send_emails(record, email_type):
         "interview_type": record.get("interview_type", "Online"),
         "location_or_link": record.get("location_or_link", ""),
         "duration": record.get("duration", ""),
-        "notes": record.get("notes", "")
+        "notes": record.get("notes", ""),
+        "interviewer": record.get("interviewer", "")
     }
 
     if email_type == "scheduled":
 
         ok, msg = send_interview_scheduled_email(
-            record.get("candidate_name", "Candidate"),
-            record.get("candidate_email", ""),
+            candidate_name,
+            candidate_email,
             details
         )
 
     elif email_type == "rescheduled":
 
         ok, msg = send_interview_rescheduled_email(
-            record.get("candidate_name", "Candidate"),
-            record.get("candidate_email", ""),
+            candidate_name,
+            candidate_email,
             details
         )
 
     elif email_type == "cancelled":
 
         ok, msg = send_interview_cancelled_email(
-            record.get("candidate_name", "Candidate"),
-            record.get("candidate_email", ""),
+            candidate_name,
+            candidate_email,
             details
         )
 
     else:
 
         ok, msg = send_interview_reminder(
-            record.get("candidate_name", "Candidate"),
-            record.get("candidate_email", ""),
+            candidate_name,
+            candidate_email,
             details
         )
 
-    if ok:
-
-        st.success(f"📧 {msg}")
-
-    else:
-
-        st.warning(f"📧 {msg}")
+    return ok, msg
 
 
 def _show_interview_row(record, with_actions=True):
-    """Render a single interview record."""
+    """Render a single interview record as a clean card."""
 
     status = record.get("status", "Scheduled")
 
-    st.markdown(
-        f"**{record.get('job_role', 'Job Role')}** "
-        f"- {record.get('candidate_name', 'Unknown')}"
-    )
+    col_title, col_status = st.columns([4, 1])
+
+    with col_title:
+
+        st.markdown(
+            f"**{record.get('job_role', 'Job Role')}** "
+            f"- {record.get('candidate_name', 'Unknown')}"
+        )
+
+    with col_status:
+
+        if status == "Scheduled":
+
+            st.markdown("🟢 **Scheduled**")
+
+        elif status == "Rescheduled":
+
+            st.markdown("🟡 **Rescheduled**")
+
+        elif status == "Completed":
+
+            st.markdown("🔵 **Completed**")
+
+        else:
+
+            st.markdown("🔴 **Cancelled**")
 
     st.caption(
         f"📅 {record.get('interview_date', '')} "
         f"| ⏰ {record.get('interview_time', '')} "
-        f"| {record.get('interview_type', 'Online')}"
+        f"| 🎤 {record.get('interview_type', 'Online')}"
     )
+
+    if record.get("interviewer"):
+
+        st.caption(
+            f"👤 Interviewer: {record['interviewer']}"
+        )
 
     if record.get("location_or_link"):
 
@@ -170,31 +241,29 @@ def _show_interview_row(record, with_actions=True):
             f"⏱ {record['duration']} minutes"
         )
 
-    if record.get("notes"):
+    with st.expander("👁️ View Details"):
 
-        st.caption(
-            f"📝 {record['notes']}"
+        st.markdown(
+            f"**Candidate:** "
+            f"{record.get('candidate_name', 'Unknown')}  \n"
+            f"**Email:** {record.get('candidate_email', '')}  \n"
+            f"**Job Role:** {record.get('job_role', '')}  \n"
+            f"**Date:** {record.get('interview_date', '')}  \n"
+            f"**Time:** {record.get('interview_time', '')}  \n"
+            f"**Type:** {record.get('interview_type', 'Online')}  \n"
+            f"**Interviewer:** "
+            f"{record.get('interviewer', '') or 'Not assigned'}  \n"
+            f"**Location/Link:** "
+            f"{record.get('location_or_link', '') or 'Not provided'}  \n"
+            f"**Duration:** {record.get('duration', 30)} minutes  \n"
+            f"**Notes:** "
+            f"{record.get('notes', '') or 'None'}  \n"
+            f"**Status:** {status}"
         )
-
-    if status == "Scheduled":
-
-        st.success("🟢 Scheduled")
-
-    elif status == "Rescheduled":
-
-        st.warning("🟡 Rescheduled")
-
-    elif status == "Completed":
-
-        st.info("🔵 Completed")
-
-    else:
-
-        st.error("🔴 Cancelled")
 
     if with_actions:
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         with col1:
 
@@ -244,9 +313,34 @@ def _show_interview_row(record, with_actions=True):
                     "Cancelled"
                 )
 
-                _send_emails(record, "cancelled")
+                ok, msg = _send_emails(record, "cancelled")
+
+                if ok:
+
+                    st.success(f"📧 {msg}")
+
+                else:
+
+                    st.warning(f"📧 {msg}")
 
                 st.rerun()
+
+        with col5:
+
+            if st.button(
+                "📧 Send Reminder",
+                key=f"remind_{record['id']}"
+            ):
+
+                ok, msg = _send_emails(record, "reminder")
+
+                if ok:
+
+                    st.success(f"📧 {msg}")
+
+                else:
+
+                    st.warning(f"📧 {msg}")
 
 
 # ============================================================
@@ -334,8 +428,26 @@ def _schedule_form():
             key="interview_scheduler_duration"
         )
 
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        interviewer = st.text_input(
+            "👤 Interviewer",
+            placeholder="Example: Mr. Sharma (HR)",
+            key="interview_scheduler_interviewer"
+        )
+
+    with col2:
+
+        st.caption(
+            "💡 The candidate notification is sent "
+            "automatically to the email stored in the "
+            "candidates database."
+        )
+
     notes = st.text_area(
-        "📝 Interview Notes",
+        "📝 Interview Notes / Additional Instructions",
         placeholder="Any instructions for the candidate...",
         key="interview_scheduler_notes"
     )
@@ -343,7 +455,7 @@ def _schedule_form():
     st.write("")
 
     if st.button(
-        "📧 Schedule Interview",
+        "📅 Schedule Interview",
         type="primary",
         use_container_width=True,
         key="interview_scheduler_schedule_button"
@@ -380,18 +492,28 @@ def _schedule_form():
                 location_or_link=location_or_link.strip(),
                 duration=int(duration),
                 notes=notes.strip(),
-                status="Scheduled"
+                status="Scheduled",
+                interviewer=interviewer.strip()
             )
 
             st.success(
-                f"✅ Interview scheduled! (ID: {interview_id})"
+                f"✅ Interview scheduled successfully. "
+                f"(ID: {interview_id})"
             )
 
             record = dict(
                 get_interview(interview_id)
             )
 
-            _send_emails(record, "scheduled")
+            ok, msg = _send_emails(record, "scheduled")
+
+            if ok:
+
+                st.success(f"📧 {msg}")
+
+            else:
+
+                st.warning(f"📧 {msg}")
 
 
 # ============================================================
@@ -462,8 +584,22 @@ def _edit_form(record):
             key=f"edur_{record['id']}"
         )
 
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        new_interviewer = st.text_input(
+            "👤 Interviewer",
+            value=record.get("interviewer", ""),
+            key=f"eint_{record['id']}"
+        )
+
+    with col2:
+
+        st.write("")
+
     new_notes = st.text_area(
-        "📝 Interview Notes",
+        "📝 Interview Notes / Additional Instructions",
         value=record.get("notes", ""),
         key=f"enotes_{record['id']}"
     )
@@ -489,7 +625,8 @@ def _edit_form(record):
                 location_or_link=new_location.strip(),
                 duration=int(new_duration),
                 notes=new_notes.strip(),
-                status=record.get("status", "Scheduled")
+                status=record.get("status", "Scheduled"),
+                interviewer=new_interviewer.strip()
             )
 
             st.success("✅ Interview updated.")
@@ -565,14 +702,23 @@ def _reschedule_form(record):
                 location_or_link=record.get("location_or_link", ""),
                 duration=int(record.get("duration", 30) or 30),
                 notes=notes.strip(),
-                status="Rescheduled"
+                status="Rescheduled",
+                interviewer=record.get("interviewer", "")
             )
 
             updated = dict(
                 get_interview(record["id"])
             )
 
-            _send_emails(updated, "rescheduled")
+            ok, msg = _send_emails(updated, "rescheduled")
+
+            if ok:
+
+                st.success(f"📧 {msg}")
+
+            else:
+
+                st.warning(f"📧 {msg}")
 
             st.session_state.pop(
                 f"rescheduling_{record['id']}",
@@ -667,28 +813,47 @@ def _reminder_section():
         if not upcoming:
 
             st.info(
-                "No upcoming interviews to remind."
+                "ℹ️ No upcoming interviews require reminders."
             )
 
         else:
 
             sent = 0
 
+            failed = 0
+
             for record in upcoming:
 
                 record = dict(record)
 
-                if record.get("candidate_email"):
+                name, email = _resolve_recipient(record)
 
-                    _send_emails(record, "reminder")
+                if not email:
+
+                    failed += 1
+
+                    continue
+
+                ok, _ = _send_emails(record, "reminder")
+
+                if ok:
 
                     sent += 1
+
+                else:
+
+                    failed += 1
 
             if sent:
 
                 st.success(
-                    f"📧 Reminders processed for "
-                    f"{sent} interview(s)."
+                    f"✅ Reminders sent successfully: {sent}"
+                )
+
+            if failed:
+
+                st.warning(
+                    f"⚠️ Failed: {failed}"
                 )
 
     if not email_configured():
