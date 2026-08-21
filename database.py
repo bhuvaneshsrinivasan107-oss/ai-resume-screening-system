@@ -471,6 +471,48 @@ def create_database():
             except sqlite3.OperationalError:
                 pass
 
+    # --------------------------------------------------------
+    # Automatically upgrade the users table
+    # (adds password-reset columns without recreating the
+    #  table or touching any existing user data)
+    # --------------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(users)"
+    )
+
+    user_columns = {
+        row["name"]
+        for row in cursor.fetchall()
+    }
+
+    required_user_columns = {
+
+        "reset_code_hash": "TEXT DEFAULT ''",
+
+        "reset_code_expires": "TEXT DEFAULT ''",
+
+        "reset_code_used": "INTEGER DEFAULT 0"
+    }
+
+    for column, definition in (
+        required_user_columns.items()
+    ):
+
+        if column not in user_columns:
+
+            try:
+
+                cursor.execute(
+                    f"""
+                    ALTER TABLE users
+                    ADD COLUMN {column} {definition}
+                    """
+                )
+
+            except sqlite3.OperationalError:
+                pass
+
     conn.commit()
 
     conn.close()
@@ -962,6 +1004,149 @@ def ensure_candidate_account(name, email):
         name=name,
         email=email,
         role="candidate"
+    )
+
+
+# ============================================================
+# PASSWORD RESET - STORE CODE
+# ============================================================
+
+def store_reset_code(user_id, code_hash, expires_at):
+    """
+    Store a hashed password-reset code for a user.
+
+    Only the HASH of the 6-digit code is stored -
+    never the raw code. Any previous reset code is
+    replaced, so old codes stop working immediately.
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET reset_code_hash = ?,
+            reset_code_expires = ?,
+            reset_code_used = 0
+        WHERE id = ?
+    """, (
+        code_hash,
+        expires_at,
+        user_id
+    ))
+
+    conn.commit()
+
+    conn.close()
+
+
+# ============================================================
+# PASSWORD RESET - INVALIDATE CODE
+# ============================================================
+
+def invalidate_reset_code(user_id):
+    """
+    Invalidate any stored reset code for a user.
+    Called after a successful password reset so the
+    same code can never be used again.
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET reset_code_hash = '',
+            reset_code_expires = '',
+            reset_code_used = 1
+        WHERE id = ?
+    """, (user_id,))
+
+    conn.commit()
+
+    conn.close()
+
+
+# ============================================================
+# PASSWORD RESET - UPDATE PASSWORD
+# ============================================================
+
+def update_user_password(user_id, new_password_hash):
+    """
+    Replace a user's stored password hash.
+    The caller passes an already-hashed password -
+    plain-text passwords are never accepted here.
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET password = ?
+        WHERE id = ?
+    """, (
+        new_password_hash,
+        user_id
+    ))
+
+    conn.commit()
+
+    conn.close()
+
+
+# ============================================================
+# GOOGLE LOGIN - CREATE USER IF NEEDED
+# ============================================================
+
+def create_google_user(name, email, role="candidate"):
+    """
+    Create an account for a Google-authenticated user.
+
+    The email must already be verified by Google.
+    Existing accounts are NEVER duplicated - if the
+    email already exists, the existing account is kept.
+
+    A random unusable password is generated (the user
+    signs in with Google; they can set a real password
+    later through Forgot Password).
+    """
+
+    if not email or "@" not in email:
+
+        return None
+
+    email = email.strip().lower()
+
+    existing = get_user_by_email(email)
+
+    if existing:
+
+        return existing["id"]
+
+    local = email.split("@")[0] or "user"
+
+    username = local
+
+    counter = 1
+
+    while username_exists(username):
+
+        username = f"{local}{counter}"
+
+        counter += 1
+
+    random_password = secrets.token_urlsafe(24)
+
+    return register_user(
+        username=username,
+        password=random_password,
+        name=name or local,
+        email=email,
+        role=role
     )
 
 

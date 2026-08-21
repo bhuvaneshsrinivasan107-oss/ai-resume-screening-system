@@ -700,3 +700,40 @@ def send_candidate_email(
 
 # Backwards-compatible alias
 send_candidate_status_email = send_status_email
+
+
+# ============================================================
+# PASSWORD RESET EMAIL
+# ============================================================
+
+def send_password_reset_email(user_name, to_email, reset_code):
+    """
+    Send a password reset code to a REGISTERED user.
+
+    The 6-digit code is generated and stored (hashed)
+    by the caller - this function only delivers it.
+
+    Uses the same SMTP configuration as every other
+    email in the application. Returns (success, message).
+    """
+
+    subject = "Password Reset Request - AI Recruiter"
+
+    body = (
+        f"Hello {user_name},\n\n"
+        "We received a request to reset your password.\n\n"
+        "Your password reset code is:\n\n"
+        f"{reset_code}\n\n"
+        "This code will expire after 10 minutes.\n\n"
+        "If you did not request a password reset, "
+        "please ignore this email.\n\n"
+        "Regards,\n"
+        "AI Recruiter"
+    )
+
+    return send_email(
+        to_email,
+        subject,
+        body,
+        event_type="Password Reset"
+    )
