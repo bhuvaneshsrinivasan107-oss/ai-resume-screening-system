@@ -5,6 +5,7 @@
 # ============================================================
 
 import os
+import logging
 from datetime import datetime
 
 import pandas as pd
@@ -26,6 +27,7 @@ from ranking_engine import rank_candidate
 
 from database import (
     create_database,
+    check_database,
     add_candidate,
     get_candidates,
     get_candidate,
@@ -76,6 +78,38 @@ st.set_page_config(
 # ============================================================
 
 create_database()
+
+
+# ============================================================
+# DATABASE CONNECTION CHECK
+# (safe - technical details are logged to the terminal only,
+#  normal users see a friendly message)
+# ============================================================
+
+db_logger = logging.getLogger("app.database")
+
+
+def verify_database_connection():
+
+    result = check_database()
+
+    if not result["ok"]:
+
+        db_logger.error(
+            "Database check failed: %s",
+            "; ".join(result["issues"])
+        )
+
+        st.error(
+            "⚠️ The application could not connect to its "
+            "database. Please try again later or contact "
+            "the administrator."
+        )
+
+        st.stop()
+
+
+verify_database_connection()
 
 
 # ============================================================
@@ -604,43 +638,33 @@ def _email_notifications_page():
 
     # --------------------------------------------------------
     # EMAIL SERVICE STATUS CARD
+    # (only shows whether SMTP is configured - the sender
+    #  address and all credentials stay hidden)
     # --------------------------------------------------------
 
-    col1, col2 = st.columns(2)
+    if email_service.email_configured():
 
-    with col1:
+        st.metric(
+            "SMTP Status",
+            "🟢 Configured"
+        )
 
-        if email_service.email_configured():
+        st.caption(
+            "Email service is ready to send "
+            "candidate notifications."
+        )
 
-            st.metric(
-                "SMTP Status",
-                "🟢 Configured"
-            )
+    else:
 
-        else:
+        st.metric(
+            "SMTP Status",
+            "🔴 Not Configured"
+        )
 
-            st.metric(
-                "SMTP Status",
-                "🔴 Not Configured"
-            )
-
-    with col2:
-
-        sender = email_service.get_sender_email()
-
-        if sender:
-
-            st.metric(
-                "Sender",
-                sender
-            )
-
-        else:
-
-            st.metric(
-                "Sender",
-                "Not configured"
-            )
+        st.caption(
+            "Email service is not configured. "
+            "Candidate notifications cannot be sent."
+        )
 
     st.divider()
 

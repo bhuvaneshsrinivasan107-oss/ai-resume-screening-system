@@ -1366,6 +1366,135 @@ def get_notifications(limit=50):
 
 
 # ============================================================
+# DATABASE CONNECTION CHECK
+# ============================================================
+
+def check_database():
+    """
+    Safe database connection check.
+
+    Verifies that:
+      1. The database file exists.
+      2. A SQLite connection succeeds.
+      3. All required tables exist.
+      4. Existing records can be read.
+
+    Returns {"ok": bool, "issues": [str, ...]}.
+    Read-only - never creates, modifies or deletes data.
+
+    Callers must NOT show the technical issue details to
+    normal users - log them and display a friendly message.
+    """
+
+    issues = []
+
+    # --------------------------------------------------------
+    # 1. DATABASE FILE EXISTS
+    # --------------------------------------------------------
+
+    if not os.path.exists(DATABASE_FILE):
+
+        issues.append("Database file is missing.")
+
+        return {
+            "ok": False,
+            "issues": issues
+        }
+
+    conn = None
+
+    try:
+
+        # ----------------------------------------------------
+        # 2. CONNECTION SUCCEEDS
+        # ----------------------------------------------------
+
+        conn = get_connection()
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table'"
+        )
+
+        existing_tables = {
+            row["name"]
+            for row in cursor.fetchall()
+        }
+
+        required_tables = [
+            "candidates",
+            "users",
+            "interviews",
+            "interview_results",
+            "notifications"
+        ]
+
+        # ----------------------------------------------------
+        # 3. REQUIRED TABLES EXIST
+        # ----------------------------------------------------
+
+        missing_tables = [
+            table
+            for table in required_tables
+            if table not in existing_tables
+        ]
+
+        if missing_tables:
+
+            issues.append(
+                "Missing tables: "
+                + ", ".join(missing_tables)
+            )
+
+        # ----------------------------------------------------
+        # 4. EXISTING RECORDS CAN BE READ
+        # ----------------------------------------------------
+
+        for table in required_tables:
+
+            if table not in existing_tables:
+
+                continue
+
+            try:
+
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                )
+
+                cursor.fetchone()
+
+            except Exception:
+
+                issues.append(
+                    f"Table not readable: {table}"
+                )
+
+    except Exception:
+
+        issues.append("Database connection failed.")
+
+    finally:
+
+        if conn is not None:
+
+            try:
+
+                conn.close()
+
+            except Exception:
+
+                pass
+
+    return {
+        "ok": len(issues) == 0,
+        "issues": issues
+    }
+
+
+# ============================================================
 # INITIALIZE DATABASE
 # ============================================================
 
