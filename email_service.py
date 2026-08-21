@@ -253,12 +253,16 @@ def get_sender_email():
     return _get_secret("SENDER_EMAIL")
 
 
-def send_email(to_email, subject, body, event_type="email"):
+def send_email(to_email, subject, body, event_type="email", html_body=None):
     """
     Send an email. Returns (success, message).
 
     Never raises - returns a friendly message
     when the email service is missing or sending fails.
+
+    html_body: optional HTML alternative part (e.g. a
+    styled button). When omitted, a plain-text-only
+    email is sent.
 
     The result is always logged in the
     notifications table (guarded - a logging
@@ -332,6 +336,12 @@ def send_email(to_email, subject, body, event_type="email"):
         message.attach(
             MIMEText(body, "plain", "utf-8")
         )
+
+        if html_body:
+
+            message.attach(
+                MIMEText(html_body, "html", "utf-8")
+            )
 
         port = int(config["port"])
 
@@ -706,34 +716,78 @@ send_candidate_status_email = send_status_email
 # PASSWORD RESET EMAIL
 # ============================================================
 
-def send_password_reset_email(user_name, to_email, reset_code):
+def send_password_reset_email(user_name, to_email, reset_link):
     """
-    Send a password reset code to a REGISTERED user.
+    Send a password-reset LINK to a REGISTERED user.
 
-    The 6-digit code is generated and stored (hashed)
-    by the caller - this function only delivers it.
+    The single-use token is generated and stored
+    (hashed) by the caller - this function only
+    delivers the link inside a professional email.
 
     Uses the same SMTP configuration as every other
     email in the application. Returns (success, message).
     """
 
-    subject = "Password Reset Request - AI Recruiter"
+    from html import escape
+
+    subject = "Password Reset - AI Resume Screening System"
 
     body = (
         f"Hello {user_name},\n\n"
-        "We received a request to reset your password.\n\n"
-        "Your password reset code is:\n\n"
-        f"{reset_code}\n\n"
-        "This code will expire after 10 minutes.\n\n"
-        "If you did not request a password reset, "
-        "please ignore this email.\n\n"
+        "We received a request to reset your password "
+        "for the AI Resume Screening System.\n\n"
+        "Click the button or link below to choose a "
+        "new password:\n\n"
+        f"{reset_link}\n\n"
+        "This link will expire after 30 minutes "
+        "and can only be used once.\n\n"
+        "If you did not request this password reset, "
+        "you can safely ignore this email - your "
+        "password will remain unchanged.\n\n"
         "Regards,\n"
-        "AI Recruiter"
+        "AI Resume Screening System"
     )
+
+    safe_name = escape(str(user_name or "there"))
+
+    safe_link = escape(str(reset_link), quote=True)
+
+    html_body = f"""\
+<html>
+  <body style="margin:0;padding:0;background-color:#f4f5f7;">
+    <div style="max-width:560px;margin:0 auto;padding:32px 24px;
+                font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+      <h2 style="margin:0 0 16px;font-size:20px;">
+        Password Reset Request
+      </h2>
+      <p>Hello {safe_name},</p>
+      <p>We received a request to reset your password for the
+         <strong>AI Resume Screening System</strong>.</p>
+      <p style="text-align:center;margin:28px 0;">
+        <a href="{safe_link}"
+           style="background-color:#2563eb;color:#ffffff;
+                  text-decoration:none;padding:12px 28px;
+                  border-radius:6px;font-weight:bold;
+                  display:inline-block;">
+          Reset Password
+        </a>
+      </p>
+      <p>If the button does not work, copy and paste this
+         link into your browser:</p>
+      <p style="word-break:break-all;color:#2563eb;">{safe_link}</p>
+      <p>This link will <strong>expire after 30 minutes</strong> and can
+         only be used <strong>once</strong>.</p>
+      <p>If you did not request this password reset, you can safely
+         ignore this email - your password will remain unchanged.</p>
+      <p>Regards,<br/>AI Resume Screening System</p>
+    </div>
+  </body>
+</html>"""
 
     return send_email(
         to_email,
         subject,
         body,
-        event_type="Password Reset"
+        event_type="Password Reset",
+        html_body=html_body
     )

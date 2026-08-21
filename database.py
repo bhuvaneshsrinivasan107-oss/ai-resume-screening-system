@@ -370,6 +370,32 @@ def create_database():
         )
     """)
 
+    # --------------------------------------------------------
+    # Password reset tokens table (Forgot Password feature).
+    # Single-use, time-limited reset links. Only the HASH of
+    # each token is stored - never the raw token itself.
+    # --------------------------------------------------------
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            user_id INTEGER DEFAULT 0,
+
+            email TEXT DEFAULT '',
+
+            token_hash TEXT DEFAULT '',
+
+            expires_at TEXT DEFAULT '',
+
+            used INTEGER DEFAULT 0,
+
+            created_at TEXT DEFAULT ''
+
+        )
+    """)
+
     conn.commit()
 
     seed_demo_users(cursor)
@@ -1092,6 +1118,190 @@ def update_user_password(user_id, new_password_hash):
         new_password_hash,
         user_id
     ))
+
+    conn.commit()
+
+    conn.close()
+
+
+# ============================================================
+# PASSWORD RESET TOKENS - FORGOT PASSWORD
+# ============================================================
+
+def create_password_reset_token(user_id, email, token_hash, expires_at):
+    """
+    Store a hashed single-use password-reset token.
+
+    Any previous UNUSED tokens for the same user are
+    invalidated first, so only the newest reset link
+    ever works.
+
+    Only the HASH of the token is stored here - the raw
+    token exists solely inside the emailed link.
+
+    Returns the new token row id, or None on failure.
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    created_at = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    try:
+
+        # Invalidate older unused tokens for this user.
+        cursor.execute("""
+            UPDATE password_reset_tokens
+            SET used = 1
+            WHERE user_id = ?
+              AND used = 0
+        """, (user_id,))
+
+        cursor.execute("""
+            INSERT INTO password_reset_tokens (
+                user_id,
+                email,
+                token_hash,
+                expires_at,
+                used,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (
+            user_id,
+            email,
+            token_hash,
+            expires_at,
+            created_at
+        ))
+
+        token_id = cursor.lastrowid
+
+        conn.commit()
+
+        return token_id
+
+    except sqlite3.Error:
+
+        return None
+
+    finally:
+
+        conn.close()
+
+
+def get_password_reset_token(token_hash):
+    """
+    Look up a reset token by its hash.
+
+    Returns a dict:
+        {
+          "status":   "valid" | "invalid" | "expired" | "used",
+          "user":     <user dict or None>,
+          "token_id": <int or None>
+        }
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    try:
+
+        cursor.execute("""
+            SELECT id, user_id, expires_at, used
+            FROM password_reset_tokens
+            WHERE token_hash = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (token_hash,))
+
+        row = cursor.fetchone()
+
+        if row is None:
+
+            return {
+                "status": "invalid",
+                "user": None,
+                "token_id": None
+            }
+
+        token = dict(row)
+
+        if token["used"]:
+
+            return {
+                "status": "used",
+                "user": None,
+                "token_id": token["id"]
+            }
+
+        expires_at = None
+
+        raw_expiry = token.get("expires_at", "")
+
+        if raw_expiry:
+
+            try:
+                expires_at = datetime.strptime(
+                    str(raw_expiry),
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except (ValueError, TypeError):
+                expires_at = None
+
+        if expires_at is None or datetime.now() > expires_at:
+
+            return {
+                "status": "expired",
+                "user": None,
+                "token_id": token["id"]
+            }
+
+        cursor.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (token["user_id"],)
+        )
+
+        urow = cursor.fetchone()
+
+        if urow is None:
+
+            return {
+                "status": "invalid",
+                "user": None,
+                "token_id": token["id"]
+            }
+
+        return {
+            "status": "valid",
+            "user": dict(urow),
+            "token_id": token["id"]
+        }
+
+    finally:
+
+        conn.close()
+
+
+def mark_password_reset_token_used(token_id):
+    """
+    Mark a reset token as used so it can never be
+    reused (single-use enforcement).
+    """
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE password_reset_tokens
+        SET used = 1
+        WHERE id = ?
+    """, (token_id,))
 
     conn.commit()
 
