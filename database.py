@@ -1309,58 +1309,6 @@ def mark_password_reset_token_used(token_id):
 
 
 # ============================================================
-# GOOGLE LOGIN - CREATE USER IF NEEDED
-# ============================================================
-
-def create_google_user(name, email, role="candidate"):
-    """
-    Create an account for a Google-authenticated user.
-
-    The email must already be verified by Google.
-    Existing accounts are NEVER duplicated - if the
-    email already exists, the existing account is kept.
-
-    A random unusable password is generated (the user
-    signs in with Google; they can set a real password
-    later through Forgot Password).
-    """
-
-    if not email or "@" not in email:
-
-        return None
-
-    email = email.strip().lower()
-
-    existing = get_user_by_email(email)
-
-    if existing:
-
-        return existing["id"]
-
-    local = email.split("@")[0] or "user"
-
-    username = local
-
-    counter = 1
-
-    while username_exists(username):
-
-        username = f"{local}{counter}"
-
-        counter += 1
-
-    random_password = secrets.token_urlsafe(24)
-
-    return register_user(
-        username=username,
-        password=random_password,
-        name=name or local,
-        email=email,
-        role=role
-    )
-
-
-# ============================================================
 # INTERVIEWS - SCHEDULE
 # ============================================================
 

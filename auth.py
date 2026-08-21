@@ -1,4 +1,24 @@
+"""
+Authentication module for the AI Resume Screening
+and Candidate Ranking System.
+
+Handles:
+- Recruiter and Candidate login (email/username + password)
+- Account creation
+- End-to-end Forgot Password (secure, single-use,
+  time-limited reset LINKS sent by email)
+
+Everything runs inside the SAME Streamlit application -
+there is no second app and no second server.
+
+Passwords are stored as secure hashes only (PBKDF2),
+never as plain text. Reset tokens are stored as hashes
+only and expire after 30 minutes.
+"""
+
+import os
 import re
+import hashlib
 import secrets
 import logging
 from datetime import datetime, timedelta
@@ -13,9 +33,10 @@ from database import (
     register_user,
     username_exists,
     email_exists,
-    store_reset_code,
-    invalidate_reset_code,
-    update_user_password
+    update_user_password,
+    create_password_reset_token,
+    get_password_reset_token,
+    mark_password_reset_token_used
 )
 
 import email_service
@@ -24,8 +45,8 @@ import email_service
 logger = logging.getLogger("auth")
 
 
-# Lifetime of a password-reset code, in minutes.
-RESET_CODE_VALID_MINUTES = 10
+# Lifetime of a password-reset link, in minutes.
+RESET_LINK_VALID_MINUTES = 30
 
 
 # ============================================================
@@ -48,6 +69,12 @@ def initialize_session():
 
     if "email" not in st.session_state:
         st.session_state.email = ""
+
+    # Which sub-view of the auth page is active:
+    # login | register | forgot_request | forgot_sent |
+    # reset_new_password | reset_invalid | reset_done
+    if "auth_view" not in st.session_state:
+        st.session_state.auth_view = "login"
 
 
 # ============================================================
@@ -80,21 +107,22 @@ def logout():
         "role",
         "name",
         "email",
-        "login_username",
-        "login_password",
-        "login_email",
-        "pw_reset_stage",
-        "pw_reset_email",
-        "pw_reset_notice",
-        "rp_email",
-        "rp_code",
-        "rp_new_password",
-        "rp_confirm_password"
+        "recruiter_login_identifier",
+        "recruiter_login_password",
+        "candidate_login_identifier",
+        "candidate_login_password",
+        "reset_token",
+        "reset_user_role",
+        "pw_link_reason",
+        "rp_show_password"
     ]:
 
         if key in st.session_state:
 
             del st.session_state[key]
+
+    # Always land back on the normal login form.
+    st.session_state["auth_view"] = "login"
 
     st.rerun()
 
@@ -315,7 +343,22 @@ def _register_form():
 
         st.session_state["account_created"] = True
 
-        st.session_state["switch_to_login"] = True
+        st.session_state["auth_view"] = "login"
+
+        st.rerun()
+
+    # ------------------------------------------------
+    # BACK TO LOGIN
+    # ------------------------------------------------
+
+    st.write("")
+
+    if st.button(
+        "← Back to Login",
+        key="reg_back_to_login"
+    ):
+
+        st.session_state["auth_view"] = "login"
 
         st.rerun()
 
@@ -330,13 +373,16 @@ def _clear_reset_state():
     """Remove every password-reset related session key."""
 
     for key in [
-        "pw_reset_stage",
-        "pw_reset_email",
-        "pw_reset_notice",
-        "rp_email",
-        "rp_code",
-        "rp_new_password",
-        "rp_confirm_password"
+        "reset_token",
+        "reset_user_role",
+        "pw_link_reason",
+        "rp_show_password",
+        "recruiter_forgot_email",
+        "candidate_forgot_email",
+        "recruiter_new_password",
+        "recruiter_confirm_password",
+        "candidate_new_password",
+        "candidate_confirm_password"
     ]:
 
         if key in st.session_state:
@@ -344,94 +390,194 @@ def _clear_reset_state():
             del st.session_state[key]
 
 
-def _generate_reset_code():
+def _hash_reset_token(token):
     """
-    Cryptographically secure random 6-digit code.
-    """
+    SHA-256 hash of the raw reset token.
 
-    return f"{secrets.randbelow(1000000):06d}"
-
-
-def _parse_reset_expiry(expires_raw):
-    """
-    Parse the stored expiry timestamp.
-    Returns None when missing/corrupt.
+    Only this hash is stored in the database - the raw
+    token exists solely inside the emailed link.
     """
 
-    if not expires_raw:
+    return hashlib.sha256(
+        str(token).encode("utf-8")
+    ).hexdigest()
 
-        return None
+
+def _get_app_base_url():
+    """
+    Build the application base URL dynamically so reset
+    links work locally AND after deployment.
+
+    Priority:
+      1. APP_BASE_URL override (env var or secret)
+      2. Host header of the CURRENT request
+      3. http://localhost:8501 fallback
+    """
+
+    override = ""
 
     try:
 
-        return datetime.strptime(
-            str(expires_raw),
-            "%Y-%m-%d %H:%M:%S"
+        override = str(
+            st.secrets.get("APP_BASE_URL", "") or ""
+        ).strip().rstrip("/")
+
+    except Exception:
+
+        override = ""
+
+    if not override:
+
+        override = str(
+            os.environ.get("APP_BASE_URL", "") or ""
+        ).strip().rstrip("/")
+
+    if override:
+
+        return override
+
+    # Derive from the CURRENT request - works for any
+    # host/port the app is actually served on.
+    try:
+
+        headers = st.context.headers
+
+        host = (
+            headers.get("Host")
+            or headers.get("host")
+            or ""
         )
 
-    except (ValueError, TypeError):
+        if host:
 
-        return None
+            proto = (
+                headers.get("X-Forwarded-Proto")
+                or headers.get("x-forwarded-proto")
+                or ""
+            ).lower()
+
+            if not proto:
+
+                proto = (
+                    "https"
+                    if "localhost" not in host
+                    and "127.0.0.1" not in host
+                    else "http"
+                )
+
+            return f"{proto}://{host}"
+
+    except Exception:
+
+        pass
+
+    return "http://localhost:8501"
 
 
-def _reset_code_is_valid(user):
+def _handle_reset_token_param():
     """
-    Check whether the user holds a usable
-    (not used, not expired) reset code.
+    Detect ?reset_token=... in the URL (opened from the
+    reset email), validate it ONCE, store the outcome in
+    session state and clean the address bar.
+
+    Runs on every authentication() call BEFORE anything
+    renders, so the reset screen always opens - even
+    after Streamlit reruns.
     """
 
-    if user is None:
+    try:
 
-        return False
+        token = str(
+            st.query_params.get("reset_token", "") or ""
+        ).strip()
 
-    stored_hash = user.get("reset_code_hash", "")
+    except Exception:
 
-    if not stored_hash:
+        token = ""
 
-        return False
+    if not token:
 
-    if user.get("reset_code_used"):
+        return
 
-        return False
-
-    expires_at = _parse_reset_expiry(
-        user.get("reset_code_expires", "")
+    result = get_password_reset_token(
+        _hash_reset_token(token)
     )
 
-    if expires_at is None:
+    if result["status"] == "valid":
 
-        return False
+        st.session_state["reset_token"] = token
 
-    if datetime.now() > expires_at:
+        st.session_state["reset_user_role"] = (
+            result["user"].get("role", "candidate")
+        )
 
-        return False
+        # Back to Login must open the portal that owns
+        # this account.
+        st.session_state["login_role"] = (
+            "👔 Recruiter"
+            if result["user"].get("role") == "recruiter"
+            else "👤 Candidate"
+        )
 
-    return True
+        st.session_state["auth_view"] = "reset_new_password"
+
+    else:
+
+        st.session_state["pw_link_reason"] = (
+            result["status"]
+        )
+
+        st.session_state["auth_view"] = "reset_invalid"
+
+    try:
+
+        st.query_params.clear()
+
+    except Exception:
+
+        pass
+
+    st.rerun()
 
 
 # ============================================================
-# FORGOT PASSWORD - STAGE 1: REQUEST CODE
+# FORGOT PASSWORD - STAGE 1: REQUEST RESET LINK
 # ============================================================
 
-def _render_reset_request_stage():
+def _render_forgot_request_stage(selected_role):
 
-    st.markdown("### 🔐 Reset Password")
+    if selected_role == "recruiter":
+
+        st.markdown("### 🤖 AI Recruiter")
+
+        st.markdown("#### Forgot Recruiter Password")
+
+        email_key = "recruiter_forgot_email"
+
+    else:
+
+        st.markdown("### 👤 Candidate Portal")
+
+        st.markdown("#### Forgot Candidate Password")
+
+        email_key = "candidate_forgot_email"
 
     st.caption(
-        "Enter your registered email address."
+        "Enter your registered email address and we "
+        "will send you a secure reset link."
     )
 
     email = st.text_input(
-        "📧 Email Address",
-        key="rp_email",
+        "📧 Registered Email",
+        key=email_key,
         placeholder="Enter your registered email"
     )
 
     if st.button(
-        "Send Reset Code",
+        "📧 Send Reset Link",
         type="primary",
         use_container_width=True,
-        key="rp_send_button"
+        key=f"{selected_role}_send_reset_button"
     ):
 
         cleaned = email.strip().lower()
@@ -454,8 +600,8 @@ def _render_reset_request_stage():
         else:
 
             # ----------------------------------------
-            # Uniform service-status notice - shown for
-            # ANY submitted address, so it never reveals
+            # Service-status notice - shown for ANY
+            # submitted address, so it never reveals
             # whether a particular email is registered.
             # ----------------------------------------
 
@@ -471,246 +617,297 @@ def _render_reset_request_stage():
                     "administrator."
                 )
 
-            # ----------------------------------------
-            # Only REGISTERED accounts receive a code.
-            # Unregistered addresses are silently
-            # ignored - the response below is identical
-            # either way (no account enumeration).
-            # ----------------------------------------
+            db_error = False
 
-            user = get_user_by_email(cleaned)
+            user = None
 
-            if user and smtp_ready:
+            if smtp_ready:
 
-                code = _generate_reset_code()
+                try:
 
-                expires_at = (
-                    datetime.now()
-                    + timedelta(
-                        minutes=RESET_CODE_VALID_MINUTES
-                    )
-                ).strftime("%Y-%m-%d %H:%M:%S")
+                    user = get_user_by_email(cleaned)
 
-                # Store only the HASH of the code -
-                # never the raw code itself.
-                store_reset_code(
-                    user["id"],
-                    hash_password(code),
-                    expires_at
-                )
+                except Exception:
 
-                sent, reason = (
-                    email_service.send_password_reset_email(
-                        user.get("name") or "User",
-                        user["email"],
-                        code
-                    )
-                )
-
-                if not sent:
-
-                    # Never expose the reason in the UI -
-                    # log it for the administrator only.
-                    logger.error(
-                        "Password reset email could not be "
-                        "sent to a registered account: %s",
-                        reason
+                    logger.exception(
+                        "Database error during "
+                        "password-reset lookup"
                     )
 
-            # Same neutral confirmation for every input.
-            st.session_state["pw_reset_email"] = cleaned
+                    db_error = True
 
-            st.session_state["pw_reset_notice"] = True
-
-            st.session_state["pw_reset_stage"] = "verify"
-
-            st.rerun()
-
-    _render_back_to_login_button("rp_request_back")
-
-
-# ============================================================
-# FORGOT PASSWORD - STAGE 2: VERIFY CODE
-# ============================================================
-
-def _render_reset_verify_stage():
-
-    if st.session_state.pop("pw_reset_notice", False):
-
-        st.info(
-            "📧 If an account exists for this email, "
-            "a reset code has been sent."
-        )
-
-    st.markdown("### 🔑 Verify Reset Code")
-
-    st.caption(
-        "Enter the 6-digit code sent to your "
-        "registered email."
-    )
-
-    code = st.text_input(
-        "🔢 Verification Code",
-        key="rp_code",
-        max_chars=6,
-        placeholder="Enter the 6-digit code"
-    )
-
-    if st.button(
-        "Verify Code",
-        type="primary",
-        use_container_width=True,
-        key="rp_verify_button"
-    ):
-
-        cleaned = code.strip()
-
-        user = get_user_by_email(
-            st.session_state.get("pw_reset_email", "")
-        )
-
-        stored_hash = (
-            user.get("reset_code_hash", "")
-            if user
-            else ""
-        )
-
-        if not user or not stored_hash:
-
-            st.error(
-                "❌ This reset code is no longer valid."
-            )
-
-        elif user.get("reset_code_used"):
-
-            st.error(
-                "❌ This reset code is no longer valid."
-            )
-
-        else:
-
-            expires_at = _parse_reset_expiry(
-                user.get("reset_code_expires", "")
-            )
-
-            if expires_at is None or (
-                datetime.now() > expires_at
-            ):
+            if db_error:
 
                 st.error(
-                    "❌ Reset code has expired. "
-                    "Please request a new code."
-                )
-
-            elif not cleaned or not check_password(
-                cleaned,
-                stored_hash
-            ):
-
-                st.error(
-                    "❌ Invalid reset code. "
-                    "Please try again."
+                    "❌ Something went wrong. "
+                    "Please try again later."
                 )
 
             else:
 
-                st.session_state[
-                    "pw_reset_stage"
-                ] = "new_password"
+                # Only an account belonging to THIS portal
+                # (recruiter/candidate) receives a link.
+                if (
+                    user is not None
+                    and user.get("role") != selected_role
+                ):
+
+                    user = None
+
+                if user is not None:
+
+                    try:
+
+                        token = secrets.token_urlsafe(32)
+
+                        expires_at = (
+                            datetime.now()
+                            + timedelta(
+                                minutes=RESET_LINK_VALID_MINUTES
+                            )
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+
+                        # Store only the HASH of the token -
+                        # never the raw token itself.
+                        stored = create_password_reset_token(
+                            user["id"],
+                            user["email"],
+                            _hash_reset_token(token),
+                            expires_at
+                        )
+
+                        if stored is not None:
+
+                            reset_link = (
+                                f"{_get_app_base_url()}"
+                                f"/?reset_token={token}"
+                            )
+
+                            sent, reason = (
+                                email_service.send_password_reset_email(
+                                    user.get("name") or "User",
+                                    user["email"],
+                                    reset_link
+                                )
+                            )
+
+                            if not sent:
+
+                                # Never expose the reason in
+                                # the UI - log it for the
+                                # administrator only.
+                                logger.error(
+                                    "Password reset email could "
+                                    "not be sent to a registered "
+                                    "account: %s",
+                                    reason
+                                )
+
+                    except Exception:
+
+                        logger.exception(
+                            "Failed to create password "
+                            "reset token"
+                        )
+
+                # Same neutral confirmation for every input
+                # (no account enumeration).
+                st.session_state["auth_view"] = "forgot_sent"
 
                 st.rerun()
 
-    _render_back_to_login_button("rp_verify_back")
+    _render_back_to_login_button(
+        f"{selected_role}_forgot_back"
+    )
 
 
 # ============================================================
-# FORGOT PASSWORD - STAGE 3: NEW PASSWORD
+# FORGOT PASSWORD - STAGE 2: LINK SENT
+# ============================================================
+
+def _render_forgot_sent_stage():
+
+    st.markdown("### 📧 Check Your Email")
+
+    st.info(
+        "📧 If an account exists for this email, "
+        "a password reset link has been sent."
+    )
+
+    st.caption(
+        f"The link expires in {RESET_LINK_VALID_MINUTES} "
+        "minutes and can be used only once. Remember to "
+        "check your spam folder."
+    )
+
+    _render_back_to_login_button("forgot_sent_back")
+
+
+# ============================================================
+# FORGOT PASSWORD - STAGE 3: NEW PASSWORD (FROM LINK)
 # ============================================================
 
 def _render_reset_new_password_stage():
 
-    st.markdown("### 🔐 Create New Password")
+    role_prefix = st.session_state.get(
+        "reset_user_role",
+        "candidate"
+    )
+
+    st.markdown("### 🔐 Reset Your Password")
 
     st.caption(
         "Choose a strong new password for your account."
     )
 
+    show_password = st.checkbox(
+        "👁 Show passwords",
+        key="rp_show_password"
+    )
+
+    pw_type = "default" if show_password else "password"
+
     new_password = st.text_input(
         "New Password",
-        type="password",
-        key="rp_new_password",
-        placeholder="Minimum 8 characters"
+        type=pw_type,
+        key=f"{role_prefix}_new_password",
+        placeholder="Minimum 6 characters"
     )
 
     confirm_password = st.text_input(
         "Confirm New Password",
-        type="password",
-        key="rp_confirm_password",
+        type=pw_type,
+        key=f"{role_prefix}_confirm_password",
         placeholder="Re-enter your new password"
     )
 
     if st.button(
-        "Reset Password",
+        "🔐 Reset Password",
         type="primary",
         use_container_width=True,
-        key="rp_reset_button"
+        key=f"{role_prefix}_reset_submit_button"
     ):
 
-        user = get_user_by_email(
-            st.session_state.get("pw_reset_email", "")
+        token = st.session_state.get("reset_token", "")
+
+        # Re-validate the token - it may have been used
+        # or expired while this form was open.
+        result = (
+            get_password_reset_token(
+                _hash_reset_token(token)
+            )
+            if token
+            else {"status": "invalid"}
         )
 
-        # Re-validate the code (it may have been used or
-        # expired while this form was open).
-        if not _reset_code_is_valid(user):
+        if result["status"] != "valid":
+
+            st.session_state["pw_link_reason"] = (
+                result["status"]
+            )
+
+            st.session_state["auth_view"] = "reset_invalid"
+
+            st.rerun()
+
+        new_pw = new_password.strip()
+
+        confirm_pw = confirm_password.strip()
+
+        if not new_pw:
 
             st.error(
-                "❌ This reset code is no longer valid."
+                "❌ Please enter a new password."
+            )
+
+        elif len(new_pw) < 6:
+
+            st.error(
+                "❌ Password must be at least "
+                "6 characters long."
+            )
+
+        elif new_pw != confirm_pw:
+
+            st.error(
+                "❌ Passwords do not match."
             )
 
         else:
 
-            new_pw = new_password.strip()
-
-            confirm_pw = confirm_password.strip()
-
-            if len(new_pw) < 8:
-
-                st.error(
-                    "❌ Password must contain at least "
-                    "8 characters."
-                )
-
-            elif new_pw != confirm_pw:
-
-                st.error(
-                    "❌ Passwords do not match."
-                )
-
-            else:
+            try:
 
                 # Store only the HASH - plain-text
                 # passwords are never persisted.
                 update_user_password(
-                    user["id"],
+                    result["user"]["id"],
                     hash_password(new_pw)
                 )
 
-                # One-time usage: invalidate the code so
+                # One-time usage: mark the token used so
                 # it can never be reused.
-                invalidate_reset_code(user["id"])
+                mark_password_reset_token_used(
+                    result["token_id"]
+                )
 
-                st.session_state[
-                    "pw_reset_stage"
-                ] = "done"
+                st.session_state["auth_view"] = "reset_done"
 
                 st.rerun()
 
-    _render_back_to_login_button("rp_new_back")
+            except Exception:
+
+                logger.exception(
+                    "Failed to update password"
+                )
+
+                st.error(
+                    "❌ Something went wrong while updating "
+                    "your password. Please try again."
+                )
+
+    _render_back_to_login_button(
+        f"{role_prefix}_reset_back"
+    )
 
 
 # ============================================================
-# FORGOT PASSWORD - STAGE 4: SUCCESS
+# FORGOT PASSWORD - STAGE 4: INVALID LINK
+# ============================================================
+
+def _render_reset_invalid_stage():
+
+    reason = st.session_state.get(
+        "pw_link_reason",
+        "invalid"
+    )
+
+    messages = {
+        "expired": (
+            "❌ This reset link has expired. "
+            "Please request a new one."
+        ),
+        "used": (
+            "❌ This reset link has already been used."
+        ),
+    }
+
+    st.error(
+        messages.get(
+            reason,
+            "❌ This reset link is invalid or has expired."
+        )
+    )
+
+    st.caption(
+        "For security reasons, reset links stop working "
+        "after 30 minutes or after a single use."
+    )
+
+    _render_back_to_login_button("reset_invalid_back")
+
+
+# ============================================================
+# FORGOT PASSWORD - STAGE 5: SUCCESS
 # ============================================================
 
 def _render_reset_done_stage():
@@ -720,23 +917,25 @@ def _render_reset_done_stage():
     )
 
     st.caption(
-        "You can now log in with your new password."
+        "You can now log in using your new password."
     )
 
     if st.button(
         "Back to Login",
         type="primary",
         use_container_width=True,
-        key="rp_done_back"
+        key="reset_done_back"
     ):
 
         _clear_reset_state()
+
+        st.session_state["auth_view"] = "login"
 
         st.rerun()
 
 
 # ============================================================
-# FORGOT PASSWORD - FLOW DISPATCHER
+# BACK TO LOGIN (shared by every sub-view)
 # ============================================================
 
 def _render_back_to_login_button(key):
@@ -750,31 +949,66 @@ def _render_back_to_login_button(key):
 
         _clear_reset_state()
 
+        # login_role (the portal radio) is untouched, so
+        # the user returns to the SAME portal they came
+        # from - recruiter stays recruiter, candidate
+        # stays candidate.
+        st.session_state["auth_view"] = "login"
+
         st.rerun()
 
 
-def _forgot_password_flow():
+# ============================================================
+# AUTH SUB-VIEW DISPATCHER
+# ============================================================
 
-    stage = st.session_state.get(
-        "pw_reset_stage",
-        "request"
-    )
+def _render_auth_subview(selected_role):
+    """
+    Render whichever sub-view is active.
 
-    if stage == "verify":
+    Returns True when a sub-view rendered (caller stops),
+    False when the normal login form should render.
+    """
 
-        _render_reset_verify_stage()
+    view = st.session_state.get("auth_view", "login")
 
-    elif stage == "new_password":
+    if view == "forgot_request":
+
+        _render_forgot_request_stage(selected_role)
+
+        return True
+
+    if view == "forgot_sent":
+
+        _render_forgot_sent_stage()
+
+        return True
+
+    if view == "reset_new_password":
 
         _render_reset_new_password_stage()
 
-    elif stage == "done":
+        return True
+
+    if view == "reset_invalid":
+
+        _render_reset_invalid_stage()
+
+        return True
+
+    if view == "reset_done":
 
         _render_reset_done_stage()
 
-    else:
+        return True
 
-        _render_reset_request_stage()
+    if view == "register":
+
+        _register_form()
+
+        return True
+
+    return False
 
 
 # ============================================================
@@ -793,16 +1027,12 @@ def authentication():
         return True
 
     # --------------------------------------------------------
-    # After account creation, switch back to the login form.
-    # This must happen BEFORE the mode radio widget renders.
+    # PASSWORD RESET LINK (?reset_token=...) - checked
+    # before anything renders so the reset screen always
+    # opens, regardless of the previous view.
     # --------------------------------------------------------
 
-    if st.session_state.pop(
-        "switch_to_login",
-        False
-    ):
-
-        st.session_state["auth_mode_radio"] = "🔐 Login"
+    _handle_reset_token_param()
 
     # --------------------------------------------------------
     # PAGE STYLE
@@ -858,20 +1088,6 @@ def authentication():
 
     with center:
 
-        # ------------------------------------------------
-        # LOGIN / CREATE ACCOUNT TOGGLE
-        # ------------------------------------------------
-
-        auth_mode = st.radio(
-            "Choose an Option",
-            [
-                "🔐 Login",
-                "📝 Create Account"
-            ],
-            horizontal=True,
-            key="auth_mode_radio"
-        )
-
         # Success message shown after account creation
         if st.session_state.pop(
             "account_created",
@@ -884,16 +1100,8 @@ def authentication():
                 "credentials."
             )
 
-        if auth_mode == "📝 Create Account":
-
-            _register_form()
-
-            return False
-
-        st.markdown("### 🔐 Login")
-
         # ------------------------------------------------
-        # LOGIN TYPE
+        # PORTAL SELECTOR (persisted as login_role)
         # ------------------------------------------------
 
         account_type = st.radio(
@@ -902,7 +1110,8 @@ def authentication():
                 "👔 Recruiter",
                 "👤 Candidate"
             ],
-            horizontal=True
+            horizontal=True,
+            key="login_role"
         )
 
         if account_type == "👔 Recruiter":
@@ -911,22 +1120,37 @@ def authentication():
             selected_role = "candidate"
 
         # ------------------------------------------------
-        # IDENTIFIER
+        # SUB-VIEWS (forgot password / reset / register)
+        # ------------------------------------------------
+
+        if _render_auth_subview(selected_role):
+            return False
+
+        # ------------------------------------------------
+        # ROLE-SPECIFIC LOGIN HEADING
         # ------------------------------------------------
 
         if selected_role == "recruiter":
 
+            st.markdown("### 🤖 AI Recruiter")
+
+            st.markdown("#### Recruiter Login")
+
             identifier = st.text_input(
                 "👤 Username or Email",
-                key="login_username",
+                key="recruiter_login_identifier",
                 placeholder="Enter your username or email"
             )
 
         else:
 
+            st.markdown("### 👤 Candidate Portal")
+
+            st.markdown("#### Candidate Login")
+
             identifier = st.text_input(
                 "📧 Email or Username",
-                key="login_email",
+                key="candidate_login_identifier",
                 placeholder="Enter your email address or username"
             )
 
@@ -939,9 +1163,30 @@ def authentication():
         password = st.text_input(
             "🔑 Password",
             type="password",
-            key="login_password",
+            key=f"{selected_role}_login_password",
             placeholder="Enter your password"
         )
+
+        st.write("")
+
+        # ------------------------------------------------
+        # FORGOT PASSWORD (BEFORE the Login button)
+        # ------------------------------------------------
+
+        col_left, col_center, col_right = st.columns(
+            [1, 2, 1]
+        )
+
+        with col_center:
+
+            if st.button(
+                "Forgot Password?",
+                key=f"{selected_role}_forgot_password_button"
+            ):
+
+                st.session_state["auth_view"] = "forgot_request"
+
+                st.rerun()
 
         st.write("")
 
@@ -952,7 +1197,8 @@ def authentication():
         login_clicked = st.button(
             "🚀 Login",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
+            key=f"{selected_role}_login_button"
         )
 
         if login_clicked:
@@ -991,9 +1237,7 @@ def authentication():
 
             if user is None:
 
-                st.error(
-                    "Invalid username or password."
-                )
+                st.error(error or "Invalid username or password.")
 
                 return False
 
@@ -1009,25 +1253,20 @@ def authentication():
 
             st.rerun()
 
+        st.write("")
+
         # ------------------------------------------------
-        # FORGOT PASSWORD
+        # CREATE ACCOUNT
         # ------------------------------------------------
 
-        col_left, col_center, col_right = st.columns(
-            [1, 2, 1]
-        )
+        if st.button(
+            "📝 Create Account",
+            use_container_width=True,
+            key=f"{selected_role}_create_account_button"
+        ):
 
-        with col_center:
+            st.session_state["auth_view"] = "register"
 
-            if st.button(
-                "Forgot Password?",
-                key="forgot_password_button"
-            ):
-
-                st.session_state[
-                    "pw_reset_stage"
-                ] = "request"
-
-                st.rerun()
+            st.rerun()
 
     return False
