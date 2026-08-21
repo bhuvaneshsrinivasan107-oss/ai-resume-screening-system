@@ -15,8 +15,7 @@ from database import (
     email_exists,
     store_reset_code,
     invalidate_reset_code,
-    update_user_password,
-    create_google_user
+    update_user_password
 )
 
 import email_service
@@ -52,7 +51,7 @@ def initialize_session():
 
 
 # ============================================================
-# START SESSION (shared by password + Google login)
+# START SESSION (shared by all login methods)
 # ============================================================
 
 def _start_session(user):
@@ -84,7 +83,6 @@ def logout():
         "login_username",
         "login_password",
         "login_email",
-        "google_pending_user",
         "pw_reset_stage",
         "pw_reset_email",
         "pw_reset_notice",
@@ -97,18 +95,6 @@ def logout():
         if key in st.session_state:
 
             del st.session_state[key]
-
-    # Also end the Google OIDC session (clears the signed
-    # auth cookie) so the next visit starts fresh.
-    try:
-
-        st.logout()
-
-        return
-
-    except Exception:
-
-        pass
 
     st.rerun()
 
@@ -792,240 +778,6 @@ def _forgot_password_flow():
 
 
 # ============================================================
-# CONTINUE WITH GOOGLE (Streamlit built-in OIDC)
-# ============================================================
-
-_GOOGLE_UNCONFIGURED_MESSAGE = (
-    "⚠️ Google login is currently unavailable.\n\n"
-    "Please configure Google OAuth credentials in:\n"
-    "`.streamlit/secrets.toml`"
-)
-
-# Placeholder values mean the [auth] configuration has not
-# been filled in yet - treat them as "not configured".
-_AUTH_PLACEHOLDERS = {
-    "",
-    "your_google_client_id",
-    "your_google_client_secret",
-    "change_me",
-    "change-me"
-}
-
-
-def _google_auth_configured():
-    """
-    True only when the [auth] section in
-    .streamlit/secrets.toml contains real-looking
-    credentials. Secrets are never displayed anywhere.
-    """
-
-    try:
-
-        auth_config = st.secrets.get("auth", None)
-
-        if auth_config is None:
-
-            return False
-
-        client_id = str(
-            auth_config.get("client_id", "") or ""
-        ).strip().lower()
-
-        client_secret = str(
-            auth_config.get("client_secret", "") or ""
-        ).strip().lower()
-
-    except Exception:
-
-        return False
-
-    if client_id in _AUTH_PLACEHOLDERS:
-
-        return False
-
-    if client_secret in _AUTH_PLACEHOLDERS:
-
-        return False
-
-    return bool(client_id) and bool(client_secret)
-
-
-def _get_google_oidc_user():
-    """
-    Return the VERIFIED Google identity from Streamlit's
-    built-in OIDC login, or None.
-
-    The email comes from Google's ID token via st.user -
-    never from manual user input.
-    """
-
-    try:
-
-        if not st.user.is_logged_in:
-
-            return None
-
-        email = str(st.user.email or "").strip().lower()
-
-        if not email:
-
-            return None
-
-        return {
-            "email": email,
-            "name": str(st.user.name or "").strip()
-        }
-
-    except Exception:
-
-        return None
-
-
-def _render_google_button():
-    """
-    Render the REAL 'Continue with Google' Streamlit
-    button. Clicking it redirects the browser to Google's
-    official sign-in page via st.login() - users NEVER
-    enter their Google password inside this application.
-    """
-
-    if st.button(
-        "🔵 Continue with Google",
-        use_container_width=True,
-        key="google_login_button"
-    ):
-
-        if not _google_auth_configured():
-
-            st.warning(
-                _GOOGLE_UNCONFIGURED_MESSAGE
-            )
-
-            return
-
-        try:
-
-            # Redirects to Google's authentication page;
-            # Google then redirects back to /oauth2callback.
-            st.login()
-
-        except Exception:
-
-            st.warning(
-                _GOOGLE_UNCONFIGURED_MESSAGE
-            )
-
-
-def _google_account_setup(pending_user):
-    """
-    Explicit account-type selection for a NEW Google user.
-
-    Google-authenticated users NEVER automatically become
-    recruiters - they must explicitly choose their role.
-    """
-
-    st.markdown("### Create Account")
-
-    st.info(
-        f"Continue as **{pending_user['email']}** "
-        "(verified by Google)"
-    )
-
-    st.caption(
-        "No account exists for this Google email yet. "
-        "Please choose your account type explicitly - "
-        "roles are never assigned automatically."
-    )
-
-    account_type = st.radio(
-        "Continue with:",
-        [
-            "👤 Candidate",
-            "👔 Recruiter"
-        ],
-        horizontal=True,
-        key="google_account_type_radio"
-    )
-
-    st.write("")
-
-    if st.button(
-        "Continue",
-        type="primary",
-        use_container_width=True,
-        key="google_create_account_button"
-    ):
-
-        role = (
-            "recruiter"
-            if account_type == "👔 Recruiter"
-            else "candidate"
-        )
-
-        name = (
-            pending_user.get("name")
-            or pending_user["email"].split("@")[0]
-        )
-
-        # Creates the account only if it does not
-        # already exist (no duplicates).
-        create_google_user(
-            name,
-            pending_user["email"],
-            role
-        )
-
-        user = get_user_by_email(
-            pending_user["email"]
-        )
-
-        if user is not None:
-
-            if "google_pending_user" in st.session_state:
-
-                del st.session_state["google_pending_user"]
-
-            _start_session(user)
-
-            st.success(
-                "✅ Account created successfully!"
-            )
-
-            st.rerun()
-
-        else:
-
-            st.error(
-                "❌ Account could not be created. "
-                "Please try again."
-            )
-
-    if st.button(
-        "Cancel",
-        key="google_cancel_button"
-    ):
-
-        if "google_pending_user" in st.session_state:
-
-            del st.session_state["google_pending_user"]
-
-        # End the Google OIDC session so the user returns
-        # to the normal login page instead of looping back
-        # into this account-type selection.
-        try:
-
-            st.logout()
-
-            return
-
-        except Exception:
-
-            pass
-
-        st.rerun()
-
-
-# ============================================================
 # LOGIN PAGE
 # ============================================================
 
@@ -1053,34 +805,6 @@ def authentication():
         st.session_state["auth_mode_radio"] = "🔐 Login"
 
     # --------------------------------------------------------
-    # GOOGLE OIDC SIGN-IN RESULT
-    # (Streamlit's built-in mechanism - after Google redirects
-    #  back to /oauth2callback, st.user holds the VERIFIED
-    #  Google email)
-    # --------------------------------------------------------
-
-    google_user = _get_google_oidc_user()
-
-    if google_user is not None:
-
-        existing_google_account = get_user_by_email(
-            google_user["email"]
-        )
-
-        if existing_google_account is not None:
-
-            # Log into the EXISTING account - its stored
-            # role decides which portal opens. No
-            # duplicates are ever created.
-            _start_session(existing_google_account)
-
-            st.success(
-                "✅ Login successful!"
-            )
-
-            return True
-
-    # --------------------------------------------------------
     # PAGE STYLE
     # --------------------------------------------------------
 
@@ -1100,13 +824,6 @@ def authentication():
             color: #6b7280;
             font-size: 17px;
             margin-bottom: 30px;
-        }
-
-        .login-or-divider {
-            text-align: center;
-            color: #6b7280;
-            font-size: 13px;
-            margin: 8px 0;
         }
 
         </style>
@@ -1170,17 +887,6 @@ def authentication():
         if auth_mode == "📝 Create Account":
 
             _register_form()
-
-            return False
-
-        # ------------------------------------------------
-        # GOOGLE: NEW USER MUST CHOOSE ACCOUNT TYPE
-        # (explicit role selection - never automatic)
-        # ------------------------------------------------
-
-        if google_user is not None:
-
-            _google_account_setup(google_user)
 
             return False
 
@@ -1302,21 +1008,6 @@ def authentication():
             )
 
             st.rerun()
-
-        # ------------------------------------------------
-        # CONTINUE WITH GOOGLE
-        # (always visible; shows a friendly warning if
-        #  OAuth credentials are not configured yet)
-        # ------------------------------------------------
-
-        st.markdown(
-            '<div class="login-or-divider">'
-            "──────── OR ────────"
-            "</div>",
-            unsafe_allow_html=True
-        )
-
-        _render_google_button()
 
         # ------------------------------------------------
         # FORGOT PASSWORD
