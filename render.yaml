@@ -1,0 +1,26 @@
+# ============================================================
+# Render deployment configuration
+# ============================================================
+#
+# This service uses Docker (see Dockerfile) because OCR-based
+# PDF extraction requires system packages (tesseract-ocr and
+# poppler-utils) that the Render native Python runtime does
+# not include.
+#
+# After deploying, set the environment variables / secret
+# "GEMINI_API_KEY" in the Render dashboard (under the Web
+# Service -> Environment), and optionally APP_BASE_URL.
+# ============================================================
+
+services:
+  - type: web
+    name: ai-resume-screening
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_BASE_URL
+        sync: false

@@ -98,7 +98,13 @@ def extract_pdf_text(file_bytes):
                 pages_text
             )
 
-    except Exception:
+    except Exception as e:
+
+        logger.warning(
+            "pdfplumber extraction failed: %s",
+            e,
+        )
+
         text = ""
 
     if text.strip():
@@ -131,7 +137,13 @@ def extract_pdf_text(file_bytes):
             pages_text
         )
 
-    except Exception:
+    except Exception as e:
+
+        logger.warning(
+            "pypdf extraction failed: %s",
+            e,
+        )
+
         text = ""
 
     return clean_text(text)
@@ -149,6 +161,11 @@ def extract_pdf_with_ocr(file_bytes):
 
     # --------------------------------------------------------
     # Method 1: PyMuPDF (no Poppler needed)
+    #
+    # Renders each page to a high-resolution image and runs
+    # OCR on it. This is the most reliable way to OCR scanned
+    # PDFs, because it does not depend on images being embedded
+    # in a way PyMuPDF can extract, nor on the Poppler binary.
     # --------------------------------------------------------
 
     try:
@@ -164,37 +181,28 @@ def extract_pdf_with_ocr(file_bytes):
 
         for page in doc:
 
-            images = page.get_images(
-                full=True
+            # Render the page to a high-resolution pixmap.
+            page_image = page.get_pixmap(
+                dpi=200
             )
 
-            for img_index in images:
-
-                xref = img_index[0]
-
-                base_image = doc.extract_image(
-                    xref
-                )
-
-                image_bytes = base_image[
-                    "image"
-                ]
-
-                pil_image = Image.open(
-                    io.BytesIO(
-                        image_bytes
+            pil_image = Image.open(
+                io.BytesIO(
+                    page_image.tobytes(
+                        "png"
                     )
                 )
+            )
 
-                text = pytesseract.image_to_string(
-                    pil_image
+            text = pytesseract.image_to_string(
+                pil_image
+            )
+
+            if text and text.strip():
+
+                extracted_pages.append(
+                    text
                 )
-
-                if text and text.strip():
-
-                    extracted_pages.append(
-                        text
-                    )
 
         doc.close()
 
@@ -214,13 +222,22 @@ def extract_pdf_with_ocr(file_bytes):
     # Method 2: pdf2image + tempfiles (needs Poppler)
     # --------------------------------------------------------
 
+    tmp_dir = None
+
     try:
 
         from pdf2image import convert_from_bytes
 
+        # Render to bytes with a temp dir so `pdftoppm`
+        # does not leak any files into the repo.
+        tmp_dir = tempfile.mkdtemp(
+            prefix="resume_pdf_ocr_"
+        )
+
         images = convert_from_bytes(
             file_bytes,
-            dpi=200
+            dpi=200,
+            output_folder=tmp_dir
         )
 
         extracted_pages = []
@@ -237,15 +254,23 @@ def extract_pdf_with_ocr(file_bytes):
                     text
                 )
 
-        return clean_text(
-            "\n".join(
-                extracted_pages
+        if extracted_pages:
+
+            return clean_text(
+                "\n".join(
+                    extracted_pages
+                )
             )
-        )
 
     except Exception as e:
 
         logger.warning("pdf2image OCR method failed: %s", e)
+
+    finally:
+
+        if tmp_dir and os.path.isdir(tmp_dir):
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return ""
 
@@ -350,9 +375,12 @@ def extract_text(uploaded_file):
 
             logger.error(
                 "All extraction methods failed for '%s'. "
-                "The file may be corrupted or contain only images "
-                "and tesseract could not process it.",
+                "The file may be corrupted or contain only images. "
+                "Tesseract available: %s. "
+                "Poppler available: %s.",
                 uploaded_file.name,
+                bool(TESSERACT_PATH),
+                bool(shutil.which("pdftoppm")),
             )
 
             return ""
