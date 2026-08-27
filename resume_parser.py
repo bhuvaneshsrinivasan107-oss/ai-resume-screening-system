@@ -68,13 +68,50 @@ def clean_text(text):
 # EXTRACT TEXT FROM NORMAL PDF
 # ============================================================
 
-def extract_pdf_text(file_bytes):
+def _extract_with_pymupdf(file_bytes):
+    """Extract text using PyMuPDF (fitz) - fastest and most reliable."""
 
-    text = ""
+    try:
 
-    # --------------------------------------------------------
-    # Method 1: pdfplumber
-    # --------------------------------------------------------
+        # Prefer the modern `pymupdf` import; fall back to the
+        # classic `fitz` name for older versions of the package.
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            import fitz
+
+        doc = fitz.open(
+            stream=file_bytes,
+            filetype="pdf"
+        )
+
+        pages_text = []
+
+        for page in doc:
+
+            page_text = page.get_text()
+
+            if page_text:
+
+                pages_text.append(
+                    page_text
+                )
+
+        doc.close()
+
+        if pages_text:
+
+            return "\n".join(pages_text)
+
+    except Exception as e:
+
+        logger.warning("PyMuPDF extraction failed: %s", e)
+
+    return ""
+
+
+def _extract_with_pdfplumber(file_bytes):
+    """Extract text using pdfplumber (fallback)."""
 
     try:
 
@@ -94,26 +131,17 @@ def extract_pdf_text(file_bytes):
                         page_text
                     )
 
-            text = "\n".join(
-                pages_text
-            )
+            return "\n".join(pages_text)
 
     except Exception as e:
 
-        logger.warning(
-            "pdfplumber extraction failed: %s",
-            e,
-        )
+        logger.warning("pdfplumber extraction failed: %s", e)
 
-        text = ""
+    return ""
 
-    if text.strip():
 
-        return clean_text(text)
-
-    # --------------------------------------------------------
-    # Method 2: pypdf
-    # --------------------------------------------------------
+def _extract_with_pypdf(file_bytes):
+    """Extract text using pypdf (final fallback)."""
 
     try:
 
@@ -133,18 +161,44 @@ def extract_pdf_text(file_bytes):
                     page_text
                 )
 
-        text = "\n".join(
-            pages_text
-        )
+        return "\n".join(pages_text)
 
     except Exception as e:
 
-        logger.warning(
-            "pypdf extraction failed: %s",
-            e,
-        )
+        logger.warning("pypdf extraction failed: %s", e)
 
-        text = ""
+    return ""
+
+
+def extract_pdf_text(file_bytes):
+
+    text = ""
+
+    # --------------------------------------------------------
+    # Method 1: PyMuPDF (fitz) - primary
+    # --------------------------------------------------------
+
+    text = _extract_with_pymupdf(file_bytes)
+
+    if text.strip():
+
+        return clean_text(text)
+
+    # --------------------------------------------------------
+    # Method 2: pdfplumber
+    # --------------------------------------------------------
+
+    text = _extract_with_pdfplumber(file_bytes)
+
+    if text.strip():
+
+        return clean_text(text)
+
+    # --------------------------------------------------------
+    # Method 3: pypdf
+    # --------------------------------------------------------
+
+    text = _extract_with_pypdf(file_bytes)
 
     return clean_text(text)
 
@@ -160,66 +214,10 @@ def extract_pdf_with_ocr(file_bytes):
         return ""
 
     # --------------------------------------------------------
-    # Method 1: PyMuPDF (no Poppler needed)
-    #
-    # Renders each page to a high-resolution image and runs
-    # OCR on it. This is the most reliable way to OCR scanned
-    # PDFs, because it does not depend on images being embedded
-    # in a way PyMuPDF can extract, nor on the Poppler binary.
-    # --------------------------------------------------------
-
-    try:
-
-        import pymupdf
-
-        doc = pymupdf.open(
-            stream=file_bytes,
-            filetype="pdf"
-        )
-
-        extracted_pages = []
-
-        for page in doc:
-
-            # Render the page to a high-resolution pixmap.
-            page_image = page.get_pixmap(
-                dpi=200
-            )
-
-            pil_image = Image.open(
-                io.BytesIO(
-                    page_image.tobytes(
-                        "png"
-                    )
-                )
-            )
-
-            text = pytesseract.image_to_string(
-                pil_image
-            )
-
-            if text and text.strip():
-
-                extracted_pages.append(
-                    text
-                )
-
-        doc.close()
-
-        if extracted_pages:
-
-            return clean_text(
-                "\n".join(
-                    extracted_pages
-                )
-            )
-
-    except Exception as e:
-
-        logger.warning("PyMuPDF OCR method failed: %s", e)
-
-    # --------------------------------------------------------
-    # Method 2: pdf2image + tempfiles (needs Poppler)
+    # Method 1: pdf2image + Tesseract (uses Poppler to render
+    # each PDF page to a Pillow image, then OCRs it). This is
+    # the most reliable general-purpose OCR path for scanned
+    # and image-based PDFs.
     # --------------------------------------------------------
 
     tmp_dir = None
@@ -228,8 +226,8 @@ def extract_pdf_with_ocr(file_bytes):
 
         from pdf2image import convert_from_bytes
 
-        # Render to bytes with a temp dir so `pdftoppm`
-        # does not leak any files into the repo.
+        # Render with a temp dir so `pdftoppm` does not leak
+        # any files into the repo or working directory.
         tmp_dir = tempfile.mkdtemp(
             prefix="resume_pdf_ocr_"
         )
@@ -271,6 +269,65 @@ def extract_pdf_with_ocr(file_bytes):
         if tmp_dir and os.path.isdir(tmp_dir):
 
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # --------------------------------------------------------
+    # Method 2: PyMuPDF page rendering + Tesseract (no Poppler)
+    #
+    # If Poppler is unavailable, render each page directly to
+    # a high-resolution image with PyMuPDF and OCR it.
+    # --------------------------------------------------------
+
+    try:
+
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            import fitz
+
+        doc = fitz.open(
+            stream=file_bytes,
+            filetype="pdf"
+        )
+
+        extracted_pages = []
+
+        for page in doc:
+
+            page_image = page.get_pixmap(
+                dpi=200
+            )
+
+            pil_image = Image.open(
+                io.BytesIO(
+                    page_image.tobytes(
+                        "png"
+                    )
+                )
+            )
+
+            text = pytesseract.image_to_string(
+                pil_image
+            )
+
+            if text and text.strip():
+
+                extracted_pages.append(
+                    text
+                )
+
+        doc.close()
+
+        if extracted_pages:
+
+            return clean_text(
+                "\n".join(
+                    extracted_pages
+                )
+            )
+
+    except Exception as e:
+
+        logger.warning("PyMuPDF OCR method failed: %s", e)
 
     return ""
 
@@ -374,10 +431,8 @@ def extract_text(uploaded_file):
                 return ocr_text
 
             logger.error(
-                "All extraction methods failed for '%s'. "
-                "The file may be corrupted or contain only images. "
-                "Tesseract available: %s. "
-                "Poppler available: %s.",
+                "PDF text extraction failed for '%s'. OCR fallback was attempted. "
+                "Tesseract available: %s. Poppler available: %s.",
                 uploaded_file.name,
                 bool(TESSERACT_PATH),
                 bool(shutil.which("pdftoppm")),

@@ -1269,8 +1269,10 @@ def resume_screening():
                 if not text:
 
                     st.warning(
-                        f"Could not extract text from "
-                        f"{uploaded_file.name}"
+                        "Unable to extract readable text from "
+                        f"'{uploaded_file.name}'. PDF text extraction "
+                        "and OCR fallback were both attempted. Please "
+                        "upload a text-based PDF or a clearer scanned PDF."
                     )
 
                     progress.progress(

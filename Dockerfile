@@ -22,6 +22,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         poppler-utils \
+        curl \
         build-essential \
         gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -44,17 +45,23 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . .
 
 # ------------------------------------------------------------
-# Streamlit configuration for headless deployment
+# Streamlit configuration for headless deployment.
+#
+# Render injects the real port via the $PORT environment
+# variable, so we never hardcode a port here.
 # ------------------------------------------------------------
 EXPOSE 8501
 
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
 # ------------------------------------------------------------
-# Launch the Streamlit application
+# Launch the Streamlit application on Render's $PORT.
+#
+# A shell command is used so $PORT (set by the Render runtime,
+# not at build time) is expanded correctly at container start.
 # ------------------------------------------------------------
-CMD ["streamlit", "run", "app.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--browser.gatherUsageStats=false"]
+CMD streamlit run app.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false
