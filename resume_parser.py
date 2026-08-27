@@ -1,6 +1,9 @@
 import os
 import re
 import io
+import shutil
+import logging
+import tempfile
 
 import pdfplumber
 import pytesseract
@@ -9,15 +12,30 @@ from PIL import Image
 from pypdf import PdfReader
 from docx import Document
 
+logger = logging.getLogger("resume_parser")
+
 
 # ============================================================
-# TESSERACT CONFIGURATION
+# TESSERACT CONFIGURATION (cross-platform)
 # ============================================================
 
-TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+def _find_tesseract():
+    if os.name == "nt":
+        win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.isfile(win_path):
+            return win_path
+    unix_path = shutil.which("tesseract")
+    if unix_path:
+        return unix_path
+    return None
 
-if os.path.exists(TESSERACT_PATH):
+TESSERACT_PATH = _find_tesseract()
+
+if TESSERACT_PATH:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+    logger.info("Tesseract found at: %s", TESSERACT_PATH)
+else:
+    logger.warning("Tesseract binary not found on this system. OCR will be unavailable.")
 
 
 # ============================================================
@@ -125,103 +143,62 @@ def extract_pdf_text(file_bytes):
 
 def extract_pdf_with_ocr(file_bytes):
 
+    if not TESSERACT_PATH:
+        logger.warning("OCR skipped: tesseract binary not available.")
+        return ""
+
+    # --------------------------------------------------------
+    # Method 1: PyMuPDF (no Poppler needed)
+    # --------------------------------------------------------
+
     try:
 
-        if not os.path.exists(
-            TESSERACT_PATH
-        ):
+        import pymupdf
 
-            return ""
+        doc = pymupdf.open(
+            stream=file_bytes,
+            filetype="pdf"
+        )
 
-        # ----------------------------------------------------
-        # Method 1: PyMuPDF (no Poppler needed)
-        # ----------------------------------------------------
+        extracted_pages = []
 
-        try:
+        for page in doc:
 
-            import pymupdf
-
-            doc = pymupdf.open(
-                stream=file_bytes,
-                filetype="pdf"
+            images = page.get_images(
+                full=True
             )
 
-            extracted_pages = []
+            for img_index in images:
 
-            for page in doc:
+                xref = img_index[0]
 
-                images = page.get_images(
-                    full=True
+                base_image = doc.extract_image(
+                    xref
                 )
 
-                for img_index in images:
+                image_bytes = base_image[
+                    "image"
+                ]
 
-                    xref = img_index[0]
-
-                    base_image = doc.extract_image(
-                        xref
-                    )
-
-                    image_bytes = base_image[
-                        "image"
-                    ]
-
-                    pil_image = Image.open(
-                        io.BytesIO(
-                            image_bytes
-                        )
-                    )
-
-                    text = pytesseract.image_to_string(
-                        pil_image
-                    )
-
-                    if text and text.strip():
-
-                        extracted_pages.append(
-                            text
-                        )
-
-            doc.close()
-
-            if extracted_pages:
-
-                return clean_text(
-                    "\n".join(
-                        extracted_pages
+                pil_image = Image.open(
+                    io.BytesIO(
+                        image_bytes
                     )
                 )
-
-        except Exception:
-
-            pass
-
-        # ----------------------------------------------------
-        # Method 2: pdf2image (needs Poppler)
-        # ----------------------------------------------------
-
-        try:
-
-            from pdf2image import convert_from_bytes
-
-            images = convert_from_bytes(
-                file_bytes,
-                dpi=200
-            )
-
-            extracted_pages = []
-
-            for image in images:
 
                 text = pytesseract.image_to_string(
-                    image
+                    pil_image
                 )
 
-                if text:
+                if text and text.strip():
 
                     extracted_pages.append(
                         text
                     )
+
+        doc.close()
+
+        if extracted_pages:
 
             return clean_text(
                 "\n".join(
@@ -229,20 +206,48 @@ def extract_pdf_with_ocr(file_bytes):
                 )
             )
 
-        except Exception:
+    except Exception as e:
 
-            pass
+        logger.warning("PyMuPDF OCR method failed: %s", e)
 
-        return ""
+    # --------------------------------------------------------
+    # Method 2: pdf2image + tempfiles (needs Poppler)
+    # --------------------------------------------------------
+
+    try:
+
+        from pdf2image import convert_from_bytes
+
+        images = convert_from_bytes(
+            file_bytes,
+            dpi=200
+        )
+
+        extracted_pages = []
+
+        for image in images:
+
+            text = pytesseract.image_to_string(
+                image
+            )
+
+            if text:
+
+                extracted_pages.append(
+                    text
+                )
+
+        return clean_text(
+            "\n".join(
+                extracted_pages
+            )
+        )
 
     except Exception as e:
 
-        print(
-            "OCR ERROR:",
-            e
-        )
+        logger.warning("pdf2image OCR method failed: %s", e)
 
-        return ""
+    return ""
 
 
 # ============================================================
@@ -290,9 +295,9 @@ def extract_docx_text(file_bytes):
 
     except Exception as e:
 
-        print(
-            "DOCX ERROR:",
-            e
+        logger.error(
+            "DOCX ERROR: %s",
+            e,
         )
 
         return ""
@@ -331,19 +336,26 @@ def extract_text(uploaded_file):
                 return text
 
             # Otherwise use OCR
-            print(
-                "Normal PDF extraction failed."
-            )
-
-            print(
-                "Trying OCR..."
+            logger.info(
+                "Normal PDF extraction yielded insufficient text for '%s'. Trying OCR...",
+                uploaded_file.name,
             )
 
             ocr_text = extract_pdf_with_ocr(
                 file_bytes
             )
 
-            return ocr_text
+            if ocr_text and ocr_text.strip():
+                return ocr_text
+
+            logger.error(
+                "All extraction methods failed for '%s'. "
+                "The file may be corrupted or contain only images "
+                "and tesseract could not process it.",
+                uploaded_file.name,
+            )
+
+            return ""
 
         # ----------------------------------------------------
         # DOCX
@@ -382,9 +394,10 @@ def extract_text(uploaded_file):
 
     except Exception as e:
 
-        print(
-            "TEXT EXTRACTION ERROR:",
-            e
+        logger.error(
+            "TEXT EXTRACTION ERROR for '%s': %s",
+            getattr(uploaded_file, 'name', 'unknown'),
+            e,
         )
 
         return ""
@@ -726,12 +739,5 @@ if __name__ == "__main__":
 
     print(
         "Tesseract:",
-        TESSERACT_PATH
-    )
-
-    print(
-        "Tesseract exists:",
-        os.path.exists(
-            TESSERACT_PATH
-        )
+        TESSERACT_PATH or "not found"
     )
