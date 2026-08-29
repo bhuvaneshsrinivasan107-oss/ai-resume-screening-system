@@ -204,6 +204,108 @@ def extract_pdf_text(file_bytes):
 
 
 # ============================================================
+# TESSERACT VALIDATION
+# ============================================================
+
+def tesseract_available():
+    """Return True if the Tesseract OCR engine is usable.
+
+    This is a development-side check: it verifies the binary is
+    reachable. On Render the Dockerfile installs tesseract-ocr,
+    so this should return True inside the container.
+    """
+    if not TESSERACT_PATH:
+        return False
+    try:
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================
+# OCR IMAGE PREPROCESSING
+# ============================================================
+
+def _ocrize(pil_image):
+    """Preprocess a page image to improve OCR accuracy.
+
+    Converts to grayscale and boosts contrast so Tesseract
+    can read scanned resumes (which are often light with
+    normal white backgrounds) more reliably.
+    """
+    gray = pil_image.convert("L")
+    try:
+        from PIL import ImageEnhance
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+    except Exception:
+        pass
+    return gray
+
+
+def _ocr_image_best(pil_image, config=""):
+    """Run OCR on an image, trying multiple rotations if needed.
+
+    Some scanned PDFs have the page rotated 90/180/270 degrees.
+    We OCR the original plus each rotation and keep the result
+    that contains the most text.
+    """
+    best_text = ""
+    best_count = 0
+
+    candidates = [0, 180, 90, 270]
+
+    for angle in candidates:
+
+        try:
+
+            img = pil_image
+
+            if angle != 0:
+
+                img = pil_image.rotate(
+                    angle,
+                    expand=True
+                )
+
+            processed = _ocrize(img)
+
+            text = pytesseract.image_to_string(
+                processed,
+                config=config
+            )
+
+            if text:
+
+                cleaned = clean_text(text)
+
+                # Non-blank lines roughly indicate useful content.
+                count = len(
+                    [
+                        line
+                        for line in cleaned.splitlines()
+                        if line.strip()
+                    ]
+                )
+
+                if count > best_count:
+
+                    best_count = count
+
+                    best_text = cleaned
+
+        except Exception as e:
+
+            logger.warning(
+                "OCR rotation %s failed: %s",
+                angle,
+                e,
+            )
+
+    return best_text
+
+
+# ============================================================
 # OCR SCANNED PDF
 # ============================================================
 
@@ -234,7 +336,7 @@ def extract_pdf_with_ocr(file_bytes):
 
         images = convert_from_bytes(
             file_bytes,
-            dpi=200,
+            dpi=300,
             output_folder=tmp_dir
         )
 
@@ -242,7 +344,7 @@ def extract_pdf_with_ocr(file_bytes):
 
         for image in images:
 
-            text = pytesseract.image_to_string(
+            text = _ocr_image_best(
                 image
             )
 
@@ -293,8 +395,10 @@ def extract_pdf_with_ocr(file_bytes):
 
         for page in doc:
 
+            # Render the page to a high-resolution pixmap
+            # (300 DPI gives Tesseract more detail to work with).
             page_image = page.get_pixmap(
-                dpi=200
+                dpi=300
             )
 
             pil_image = Image.open(
@@ -305,7 +409,7 @@ def extract_pdf_with_ocr(file_bytes):
                 )
             )
 
-            text = pytesseract.image_to_string(
+            text = _ocr_image_best(
                 pil_image
             )
 
@@ -390,16 +494,50 @@ def extract_docx_text(file_bytes):
 # ============================================================
 
 def extract_text(uploaded_file):
+    """Compatibility wrapper: return extracted text as a string.
+
+    Returns "" (empty) when no text can be extracted. Prefer
+    `extract_resume_with_result` when a per-file error reason is
+    needed for the UI.
+    """
+    text, _ = extract_resume_with_result(uploaded_file)
+    return text
+
+
+def extract_resume_with_result(uploaded_file):
+    """Extract resume text and return (text, reason).
+
+    reason is a dict with keys: 'filename', 'ok', 'message',
+    'suggested_action'. This is used by the UI to report failures
+    per file without crashing the whole screening run.
+    """
+
+    filename = getattr(
+        uploaded_file,
+        'name',
+        'unknown'
+    )
+
+    def _fail(reason, action):
+        return "", {
+            "filename": filename,
+            "ok": False,
+            "message": reason,
+            "suggested_action": action,
+        }
 
     try:
 
-        file_name = uploaded_file.name.lower()
+        file_name = filename.lower()
 
         file_bytes = uploaded_file.getvalue()
 
         if not file_bytes:
 
-            return ""
+            return _fail(
+                "The file is empty.",
+                "Please upload a non-empty resume.",
+            )
 
         # ----------------------------------------------------
         # PDF
@@ -407,20 +545,25 @@ def extract_text(uploaded_file):
 
         if file_name.endswith(".pdf"):
 
-            # First try normal PDF extraction
+            # First try normal PDF text extraction.
             text = extract_pdf_text(
                 file_bytes
             )
 
-            # If text exists, use it
             if text and len(text.strip()) >= 30:
 
-                return text
+                return text, {
+                    "filename": filename,
+                    "ok": True,
+                    "message": "",
+                    "suggested_action": "",
+                }
 
-            # Otherwise use OCR
+            # Otherwise attempt OCR.
             logger.info(
-                "Normal PDF extraction yielded insufficient text for '%s'. Trying OCR...",
-                uploaded_file.name,
+                "Normal PDF extraction yielded insufficient text "
+                "for '%s'. Trying OCR...",
+                filename,
             )
 
             ocr_text = extract_pdf_with_ocr(
@@ -428,17 +571,31 @@ def extract_text(uploaded_file):
             )
 
             if ocr_text and ocr_text.strip():
-                return ocr_text
 
-            logger.error(
-                "PDF text extraction failed for '%s'. OCR fallback was attempted. "
-                "Tesseract available: %s. Poppler available: %s.",
-                uploaded_file.name,
-                bool(TESSERACT_PATH),
-                bool(shutil.which("pdftoppm")),
+                return ocr_text, {
+                    "filename": filename,
+                    "ok": True,
+                    "message": "",
+                    "suggested_action": "",
+                }
+
+            # Determine a helpful reason based on environment.
+            if not tesseract_available():
+
+                return _fail(
+                    "OCR engine (Tesseract) is not available on "
+                    "the server, so this image-based resume could "
+                    "not be read.",
+                    "The server needs tesseract-ocr installed. "
+                    "The Docker deployment installs it automatically.",
+                )
+
+            return _fail(
+                "The PDF appears to contain no readable text and "
+                "OCR could not extract any either.",
+                "The PDF may be corrupted or contain an unsupported "
+                "image format. Try a clearer scan.",
             )
-
-            return ""
 
         # ----------------------------------------------------
         # DOCX
@@ -446,8 +603,22 @@ def extract_text(uploaded_file):
 
         elif file_name.endswith(".docx"):
 
-            return extract_docx_text(
+            docx_text = extract_docx_text(
                 file_bytes
+            )
+
+            if docx_text:
+
+                return docx_text, {
+                    "filename": filename,
+                    "ok": True,
+                    "message": "",
+                    "suggested_action": "",
+                }
+
+            return _fail(
+                "This DOCX document did not yield any readable text.",
+                "The document may be empty or password-protected.",
             )
 
         # ----------------------------------------------------
@@ -458,32 +629,53 @@ def extract_text(uploaded_file):
 
             try:
 
-                return clean_text(
+                txt_text = clean_text(
                     file_bytes.decode(
                         "utf-8",
                         errors="ignore"
                     )
                 )
 
+                if txt_text:
+
+                    return txt_text, {
+                        "filename": filename,
+                        "ok": True,
+                        "message": "",
+                        "suggested_action": "",
+                    }
+
             except Exception:
 
-                return ""
+                pass
+
+            return _fail(
+                "This text file yielded no readable content.",
+                "The file may be empty.",
+            )
 
         # ----------------------------------------------------
-        # Unsupported
+        # Unsupported format
         # ----------------------------------------------------
 
-        return ""
+        return _fail(
+            "Unsupported file format.",
+            "Please upload a PDF or DOCX resume.",
+        )
 
     except Exception as e:
 
         logger.error(
             "TEXT EXTRACTION ERROR for '%s': %s",
-            getattr(uploaded_file, 'name', 'unknown'),
+            filename,
             e,
         )
 
-        return ""
+        return _fail(
+            "The resume could not be read due to an unexpected "
+            "processing error.",
+            "The file may be corrupted. Please try another resume.",
+        )
 
 
 # ============================================================

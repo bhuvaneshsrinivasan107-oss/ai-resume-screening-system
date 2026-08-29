@@ -11,6 +11,13 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+# Log to the console so technical errors are visible in Render
+# Logs without confusing end users.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 # ============================================================
 # EXISTING PROJECT MODULES
 # ============================================================
@@ -19,6 +26,7 @@ from auth import authentication, logout
 
 from resume_parser import (
     extract_text,
+    extract_resume_with_result,
     extract_candidate_details,
     extract_skills
 )
@@ -48,6 +56,8 @@ import email_service
 import ai_interview
 import resume_improvement
 import multilingual_parser
+
+logger = logging.getLogger("app")
 
 df = get_candidates()
 
@@ -1240,6 +1250,8 @@ def resume_screening():
 
         results = []
 
+        failed_files = []
+
         progress = st.progress(0)
 
         status_text = st.empty()
@@ -1262,17 +1274,30 @@ def resume_screening():
                 # EXTRACT RESUME TEXT
                 # --------------------------------------------
 
-                text = extract_text(
+                text, result_info = extract_resume_with_result(
                     uploaded_file
                 )
 
                 if not text:
 
-                    st.warning(
-                        "Unable to extract readable text from "
-                        f"'{uploaded_file.name}'. PDF text extraction "
-                        "and OCR fallback were both attempted. Please "
-                        "upload a text-based PDF or a clearer scanned PDF."
+                    # Track the failure (with a friendly reason)
+                    # and continue with the next resume.
+                    reason = result_info.get(
+                        "message",
+                        "The resume could not be read.",
+                    )
+
+                    action = result_info.get(
+                        "suggested_action",
+                        "",
+                    )
+
+                    failed_files.append(
+                        {
+                            "filename": uploaded_file.name,
+                            "message": reason,
+                            "suggested_action": action,
+                        }
                     )
 
                     progress.progress(
@@ -1445,9 +1470,26 @@ def resume_screening():
 
             except Exception as e:
 
-                st.error(
-                    f"Error processing "
-                    f"{uploaded_file.name}: {e}"
+                # Log technical details for developers; show the
+                # user only a friendly per-file message.
+                logger.error(
+                    "Error processing %s: %s",
+                    uploaded_file.name,
+                    e,
+                )
+
+                failed_files.append(
+                    {
+                        "filename": uploaded_file.name,
+                        "message": (
+                            "The resume could not be processed "
+                            "due to an unexpected error."
+                        ),
+                        "suggested_action": (
+                            "The file may be corrupted. "
+                            "Please try another resume."
+                        ),
+                    }
                 )
 
             progress.progress(
@@ -1456,12 +1498,30 @@ def resume_screening():
 
         status_text.empty()
 
-        if results:
+        # ----------------------------------------------------
+        # SUMMARY
+        # ----------------------------------------------------
 
-            st.success(
-                f"Successfully screened "
-                f"{len(results)} resume(s)."
-            )
+        success_count = len(results)
+
+        fail_count = len(failed_files)
+
+        if success_count > 0:
+
+            if fail_count > 0:
+
+                st.success(
+                    f"{success_count} resume(s) processed "
+                    f"successfully. {fail_count} resume(s) "
+                    f"could not be processed."
+                )
+
+            else:
+
+                st.success(
+                    f"Successfully screened "
+                    f"{success_count} resume(s)."
+                )
 
             results_df = pd.DataFrame(
                 results
@@ -1473,11 +1533,42 @@ def resume_screening():
                 hide_index=True
             )
 
-        else:
+        elif fail_count > 0:
 
             st.error(
                 "No resumes could be processed."
             )
+
+        # ----------------------------------------------------
+        # FAILED RESUMES (friendly, per-file)
+        # ----------------------------------------------------
+
+        if failed_files:
+
+            st.warning(
+                "⚠️ " + f"{fail_count} resume(s) could not be read:"
+            )
+
+            for failed in failed_files:
+
+                st.markdown(
+                    f"**{failed['filename']}**"
+                )
+
+                st.write(
+                    failed.get("message", "Could not be read.")
+                )
+
+                action = failed.get(
+                    "suggested_action",
+                    "",
+                )
+
+                if action:
+
+                    st.caption(
+                        f"💡 {action}"
+                    )
 
 
 # ============================================================
