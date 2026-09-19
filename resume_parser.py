@@ -713,6 +713,51 @@ def extract_email(text):
 
             return email
 
+    # --------------------------------------------------------
+    # Fallback: OCR sometimes splits edges of the email with
+    # extra symbols (e.g. "W_arun@g_mail.com"->"arun@gmail.com"
+    # or "arun@gmail_com"). Find a clean @-based match.
+    # --------------------------------------------------------
+
+    at_match = re.search(
+        r"[A-Za-z0-9][A-Za-z0-9._%+-]*(?:@|…|→)\s*"
+        r"[A-Za-z0-9][A-Za-z0-9.-]*(?:\.|\.\.|…)\s*"
+        r"[A-Za-z]{2,}",
+        text
+    )
+
+    if at_match:
+
+        email = at_match.group(0)
+
+        email = email.replace(
+            " ", ""
+        )
+
+        email = email.replace(
+            "…", ""
+        )
+
+        email = email.replace(
+            "→", "@"
+        )
+
+        email = re.sub(
+            r"\.+",
+            ".",
+            email
+        )
+
+        email = re.sub(
+            r"[^A-Za-z0-9@._%-]",
+            "",
+            email
+        )
+
+        if "@" in email and "." in email:
+
+            return email
+
     return "Not Found"
 
 
@@ -726,9 +771,15 @@ def extract_phone(text):
 
         r"\+91[\s-]?\d{10}",
 
-        r"\b\d{10}\b",
+        r"\+91[\s-]?\d{5}[\s-]?\d{5}",
 
-        r"\+91[\s-]?\d{5}[\s-]?\d{5}"
+        r"\+\d{1,3}[\s-]?\(\d{2,4}\)[\s-]?\d{3,4}[\s-]?\d{4}",
+
+        r"\(\d{3}\)[\s-]?\d{3}[\s-]?\d{4}",
+
+        r"\b\d{5}[\s-]\d{5}\b",
+
+        r"\b\d{10}\b",
 
     ]
 
@@ -747,98 +798,179 @@ def extract_phone(text):
 
 
 # ============================================================
+# NAME VALIDATION HELPERS
+# ============================================================
+
+def _looks_like_name_word(word):
+    """Return True if word has a human-name capitalization pattern.
+
+    Rejects OCR noise like "woIsioag" (uppercase in the middle),
+    "wajqoid" (no capitals) and "yigy" - while accepting real
+    names like John, SMITH, Mcdonald, O'Brien, Jean-Pierre.
+    """
+    if not word or len(word) < 2 or len(word) > 12:
+        return False
+
+    if word.isupper():
+        return True
+
+    caps = [i for i, ch in enumerate(word) if ch.isupper()]
+
+    if len(caps) == 1:
+        return caps[0] == 0
+
+    if len(caps) == 2:
+        return caps[0] == 0
+
+    return False
+
+
+def _is_valid_name(name):
+    """Check if a name looks like a real person name."""
+    if not name or len(name) < 3:
+        return False
+    words = name.split()
+    if len(words) < 2 or len(words) > 5:
+        return False
+    for word in words:
+        if not word or len(word) < 2 or len(word) > 20:
+            return False
+        if not word[0].isupper():
+            return False
+        if len(word) > 12:
+            return False
+    return True
+
+
+def _name_from_email(email):
+    """Derive a candidate name from an email address."""
+    if not email or "@" not in email:
+        return ""
+    local = email.split("@")[0]
+    local = re.sub(
+        r'^(info|admin|contact|support|hello|hi|mail|email|user|test)',
+        '', local, flags=re.IGNORECASE
+    )
+    parts = re.split(r'[._\-+]', local)
+    parts = [p for p in parts if p and len(p) >= 2 and p.isalpha()]
+    if len(parts) >= 2:
+        return " ".join(p.capitalize() for p in parts[:3])
+    return ""
+
+
+# ============================================================
 # EXTRACT NAME
 # ============================================================
 
 def extract_name(text, filename=""):
+    """Extract candidate name using multiple strategies.
+
+    Priority:
+    1. Labeled patterns (Name:, Full Name:, etc.)
+    2. Email-derived name
+    3. Strict heuristic (first lines)
+    4. Filename-based
+    5. "Unknown Candidate"
+    """
 
     lines = [
-
         line.strip()
-
         for line in text.splitlines()
-
         if line.strip()
     ]
 
     # --------------------------------------------------------
-    # Try first few lines
+    # Strategy 1: Labeled patterns
     # --------------------------------------------------------
 
+    labeled_patterns = [
+        r'(?:candidate\s+name|full\s+name|name)\s*[:\-=]\s*(.+?)(?:\n|$)',
+        r'(?:applicant|person)\s*[:\-=]\s*(.+?)(?:\n|$)',
+    ]
+
+    for pattern in labeled_patterns:
+        match = re.search(
+            pattern, text,
+            re.IGNORECASE | re.MULTILINE
+        )
+        if match:
+            name = match.group(1).strip()
+            name = re.sub(
+                r"[^A-Za-z .'-]", "", name
+            ).strip()
+            if _is_valid_name(name):
+                return name
+
+    # --------------------------------------------------------
+    # Strategy 2: Email-derived name
+    # --------------------------------------------------------
+
+    email = extract_email(text)
+    if email and email != "Not Found":
+        name_from_email = _name_from_email(email)
+        if name_from_email:
+            return name_from_email
+
+    # --------------------------------------------------------
+    # Strategy 3: Strict heuristic (first lines)
+    # --------------------------------------------------------
+
+    blocked = [
+        "resume", "curriculum", "vitae", "email",
+        "phone", "mobile", "address", "profile",
+        "objective", "summary", "skills", "education",
+        "experience", "contact", "certification",
+        "project", "reference", "date", "birth",
+        "age", "gender", "nationality", "religion",
+        "marital", "declaration", "career",
+        "professional", "personal", "academic",
+        "award", "achievement", "language", "interest",
+        "hobby", "detail", "information", "about",
+        "engineer", "developer", "analyst", "manager",
+        "designer", "architect", "consultant",
+        "scientist", "researcher", "recruiter",
+        "intern", "freelancer", "lead", "senior",
+        "junior", "associate", "specialist",
+        "coordinator", "executive", "officer",
+        "technician", "software", "web", "cloud",
+        "devops", "administrator", "professional",
+    ]
+
     for line in lines[:15]:
-
         clean_line = re.sub(
-            r"[^A-Za-z .'-]",
-            "",
-            line
+            r"[^A-Za-z .'-]", "", line
         ).strip()
-
         words = clean_line.split()
 
         if 2 <= len(words) <= 4:
-
             lower_line = clean_line.lower()
 
-            blocked = [
-
-                "resume",
-                "curriculum",
-                "vitae",
-                "email",
-                "phone",
-                "mobile",
-                "address",
-                "profile",
-                "objective",
-                "summary",
-                "skills",
-                "education",
-                "experience",
-                "contact"
-            ]
-
             if not any(
-                word in lower_line
-                for word in blocked
+                word in lower_line for word in blocked
             ):
-
                 if all(
-                    re.match(
-                        r"^[A-Za-z][A-Za-z.'-]*$",
-                        word
-                    )
+                    _looks_like_name_word(word)
                     for word in words
                 ):
-
-                    return clean_line
+                    if all(
+                        len(word) >= 2 for word in words
+                    ):
+                        return clean_line
 
     # --------------------------------------------------------
-    # Try filename
+    # Strategy 4: Filename
     # --------------------------------------------------------
 
     if filename:
-
         name = os.path.splitext(
             os.path.basename(filename)
         )[0]
-
         name = re.sub(
-            r"resume",
-            "",
-            name,
+            r'resume|cv', '', name,
             flags=re.IGNORECASE
         )
-
-        name = re.sub(
-            r"[_\-]+",
-            " ",
-            name
-        )
-
-        name = name.strip()
-
-        if name:
-
+        name = re.sub(r'[_\-]+', ' ', name).strip()
+        if name and len(name) >= 3 and len(name) <= 50:
             return name.title()
 
     return "Unknown Candidate"
@@ -857,20 +989,48 @@ def extract_skills(text):
         "c++",
         "c#",
         "c",
-
+        "javascript",
+        "typescript",
+        "go",
+        "rust",
+        "ruby",
+        "php",
+        "swift",
+        "kotlin",
+        "scala",
+        "r",
+        "matlab",
+        "sas",
+        "perl",
+        "lua",
         "sql",
+
         "mysql",
         "postgresql",
         "mongodb",
+        "oracle",
+        "sql server",
+        "redis",
+        "cassandra",
+        "dynamodb",
+        "elasticsearch",
+        "neo4j",
+        "sqlite",
+        "db2",
 
         "excel",
         "power bi",
         "tableau",
+        "looker",
+        "qlik",
 
         "pandas",
         "numpy",
+        "scipy",
         "scikit-learn",
         "sklearn",
+        "xgboost",
+        "lightgbm",
 
         "machine learning",
         "deep learning",
@@ -879,6 +1039,7 @@ def extract_skills(text):
         "data science",
         "data analysis",
         "data analytics",
+        "data visualization",
 
         "nlp",
         "natural language processing",
@@ -887,34 +1048,141 @@ def extract_skills(text):
 
         "tensorflow",
         "pytorch",
+        "keras",
 
         "aws",
         "azure",
         "google cloud",
+        "gcp",
 
         "docker",
+        "kubernetes",
+        "terraform",
+        "ansible",
+        "jenkins",
+        "ci/cd",
+        "devops",
 
         "git",
         "github",
+        "gitlab",
 
         "flask",
         "fastapi",
         "streamlit",
+        "django",
+        "spring",
+        "angular",
+        "vue.js",
+        "react",
+        "node.js",
+        "next.js",
 
         "html",
         "css",
-        "javascript",
-        "react",
-        "node.js",
+        "sass",
+        "bootstrap",
 
         "matplotlib",
         "seaborn",
+        "plotly",
+        "bokeh",
 
         "statistics",
         "statistical analysis",
+        "regression",
+        "classification",
+        "clustering",
+        "a/b testing",
 
         "powerpoint",
-        "ms office"
+        "word",
+        "ms office",
+        "google sheets",
+        "google docs",
+
+        "communication",
+        "leadership",
+        "teamwork",
+        "problem solving",
+        "analytical thinking",
+        "project management",
+        "time management",
+        "presentation",
+        "negotiation",
+        "critical thinking",
+        "strategic planning",
+
+        "agile",
+        "scrum",
+        "kanban",
+        "six sigma",
+        "pmp",
+        "itil",
+
+        "data engineering",
+        "etl",
+        "big data",
+        "spark",
+        "hadoop",
+        "kafka",
+        "airflow",
+        "hive",
+
+        "blockchain",
+        "cybersecurity",
+        "networking",
+        "linux",
+        "windows server",
+
+        "sales",
+        "marketing",
+        "seo",
+        "sem",
+        "social media",
+        "content writing",
+        "copywriting",
+
+        "financial analysis",
+        "accounting",
+        "tally",
+        "sap",
+        "erp",
+
+        "java spring boot",
+        "microservices",
+        "rest api",
+        "graphql",
+        "web scraping",
+        "beautifulsoup",
+        "selenium",
+
+        "jira",
+        "confluence",
+        "slack",
+        "trello",
+        "notion",
+
+        "photoshop",
+        "illustrator",
+        "figma",
+        "adobe xd",
+        "canva",
+
+        "video editing",
+        "premiere pro",
+        "after effects",
+
+        "technical writing",
+        "report writing",
+        "data entry",
+        "typing",
+
+        "quality assurance",
+        "qa testing",
+        "selenium testing",
+        "automation testing",
+        "manual testing",
     ]
 
     text_lower = text.lower()
@@ -958,6 +1226,84 @@ def extract_skills(text):
 
 
 # ============================================================
+# EXTRACT EDUCATION
+# ============================================================
+
+def _extract_education(text):
+    """Best-effort extraction of education snippets."""
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    keywords = [
+        "b.tech", "b.e", "m.tech", "b.sc", "m.sc", "ba ",
+        "ma ", "phd", "mba", "bca", "mca", "bcom", "mcom",
+        "bachelor", "master", "degree", "diploma",
+        "engineering", "university", "college", "school",
+        "intermediate", "high school", "ssc", "hsc",
+    ]
+
+    found = []
+
+    for i, line in enumerate(lines[:80]):
+
+        lower = line.lower()
+
+        if any(k in lower for k in keywords):
+
+            snippet = " ".join(lines[i:i + 2])
+            snippet = " ".join(snippet.split())
+            if snippet not in found:
+                found.append(snippet)
+
+        if len(found) >= 3:
+            break
+
+    return found
+
+
+# ============================================================
+# EXTRACT EXPERIENCE
+# ============================================================
+
+def _extract_experience(text):
+    """Best-effort extraction of experience snippets."""
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    keywords = [
+        "experience", "work history", "employment",
+        "professional experience", "job", "intern",
+        "worked at", "worked as", "years of",
+    ]
+
+    found = []
+
+    for i, line in enumerate(lines[:80]):
+
+        lower = line.lower()
+
+        if any(k in lower for k in keywords):
+
+            snippet = " ".join(lines[i:i + 2])
+            snippet = " ".join(snippet.split())
+            if snippet not in found:
+                found.append(snippet)
+
+        if len(found) >= 3:
+            break
+
+    return found
+
+
+# ============================================================
 # EXTRACT CANDIDATE DETAILS
 # ============================================================
 
@@ -987,6 +1333,80 @@ def extract_candidate_details(
         text
     )
 
+    education = _extract_education(
+        text
+    )
+
+    experience = _extract_experience(
+        text
+    )
+
+    # --------------------------------------------------------
+    # Gemini fallback for missing critical fields
+    # --------------------------------------------------------
+
+    need_gemini = (
+        (name == "Unknown Candidate" or email == "Not Found")
+        and len(text) > 50
+    )
+
+    if need_gemini:
+        try:
+            from gemini_service import ask_gemini
+            prompt = (
+                "Extract the following from this resume text.\n"
+                "Return ONLY a valid JSON object, nothing else.\n\n"
+                "Fields: name, email, phone, skills (as comma-separated string)\n\n"
+                "Resume text:\n"
+                + text[:3000] + "\n\n"
+                'JSON format: {"name":"...","email":"...","phone":"...","skills":"..."}'
+            )
+            response, error = ask_gemini(prompt)
+            if response and not error:
+                import json as _json
+                json_match = re.search(
+                    r'\{[^{}]*\}', response, re.DOTALL
+                )
+                if json_match:
+                    data = _json.loads(json_match.group())
+                    if (
+                        name == "Unknown Candidate"
+                        and data.get("name", "").strip()
+                    ):
+                        extracted = data["name"].strip()
+                        if _is_valid_name(extracted):
+                            name = extracted
+                    if (
+                        email == "Not Found"
+                        and data.get("email", "").strip()
+                    ):
+                        em = data["email"].strip()
+                        if re.search(
+                            r'@', em
+                        ):
+                            email = em
+                    if (
+                        phone == "Not Found"
+                        and data.get("phone", "").strip()
+                    ):
+                        phone = data["phone"].strip()
+                    if not skills and data.get("skills"):
+                        raw = data["skills"]
+                        if isinstance(raw, str):
+                            skills = [
+                                s.strip()
+                                for s in raw.split(",")
+                                if s.strip()
+                            ]
+                        elif isinstance(raw, list):
+                            skills = [
+                                s.strip()
+                                for s in raw
+                                if s and s.strip()
+                            ]
+        except Exception:
+            pass
+
     return {
 
         "name": name,
@@ -996,6 +1416,10 @@ def extract_candidate_details(
         "phone": phone,
 
         "skills": skills,
+
+        "education": education,
+
+        "experience": experience,
 
         "resume_text": text
 

@@ -14,7 +14,7 @@
 
 services:
   - type: web
-    name: ai-resume-screening
+    name: ai-resume-screening-system
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile

@@ -18,20 +18,14 @@ def calculate_skill_match(
 ):
 
     candidate_skills = [
-
         normalize_skill(skill)
-
         for skill in candidate_skills
-
         if skill
     ]
 
     required_skills = [
-
         normalize_skill(skill)
-
         for skill in required_skills
-
         if skill
     ]
 
@@ -67,16 +61,16 @@ def calculate_skill_match(
                 required
             )
 
+    # No recognizable skills in the job description:
+    # do NOT score everyone as 0 (which would auto-Reject).
     if not required_skills:
 
-        return 0, matched, missing
+        return 50, matched, missing
 
     score = (
-
         len(matched)
         /
         len(required_skills)
-
     ) * 100
 
     return (

@@ -1319,13 +1319,11 @@ def resume_screening():
 
                     candidate = {}
 
-                candidate[
-                    "resume_text"
-                ] = text
-
                 # --------------------------------------------
                 # RANK CANDIDATE
                 # --------------------------------------------
+
+                ranking_result = None
 
                 try:
 
@@ -1339,23 +1337,15 @@ def resume_screening():
                         )
                     )
 
-                except TypeError:
+                except Exception as e:
 
-                    try:
+                    logger.error(
+                        "Ranking error for %s: %s",
+                        uploaded_file.name,
+                        e,
+                    )
 
-                        ranking_result = rank_candidate(
-                            candidate.get(
-                                "skills",
-                                []
-                            ),
-                            extract_skills(
-                                job_description
-                            )
-                        )
-
-                    except Exception:
-
-                        ranking_result = None
+                    ranking_result = None
 
                 # --------------------------------------------
                 # HANDLE RANKING RESULT
@@ -1410,9 +1400,19 @@ def resume_screening():
 
                 # --------------------------------------------
                 # FALLBACK STATUS
-                # --------------------------------------------
+                # ---------------------------------------------------
+                # If ranking could not be computed at all, keep the
+                # candidate as "Pending" - never auto-decline on a
+                # missing/unreadable field.
+                # ----------------------------------------------------
 
-                if status not in [
+                if ranking_result is None:
+
+                    score = 0.0
+
+                    status = "Pending"
+
+                elif status not in [
                     "Approved",
                     "Pending",
                     "Rejected"
