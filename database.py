@@ -101,6 +101,12 @@ def seed_demo_users(cursor):
     """
     Insert demo recruiter and candidate accounts
     if they do not already exist. Passwords hashed.
+
+    Demo candidate account emails are kept aligned with the
+    emails extracted from the demo resumes so that each
+    candidate account links to the corresponding screening
+    result in the Candidate Portal (accounts and results
+    are linked by exact email).
     """
 
     demo_users = [
@@ -122,7 +128,7 @@ def seed_demo_users(cursor):
             "arun",
             "arun123",
             "Arun Kumar",
-            "arun-kumar@email.com",
+            "arun.kumar@email.com",
             "candidate"
         ),
         (
@@ -136,7 +142,7 @@ def seed_demo_users(cursor):
             "rahul",
             "rahul123",
             "Rahul Verma",
-            "rahul.verma@email.com",
+            "verma@email.com",
             "candidate"
         )
     ]
@@ -154,34 +160,117 @@ def seed_demo_users(cursor):
     ) in demo_users:
 
         cursor.execute("""
-            SELECT COUNT(*)
+            SELECT id, email
             FROM users
             WHERE LOWER(username) = LOWER(?)
-               OR LOWER(email) = LOWER(?)
         """, (
             username,
-            email
         ))
 
-        if cursor.fetchone()[0] == 0:
+        existing = cursor.fetchone()
+
+        if existing is None:
 
             cursor.execute("""
-                INSERT INTO users (
+                SELECT COUNT(*)
+                FROM users
+                WHERE LOWER(email) = LOWER(?)
+            """, (
+                email,
+            ))
+
+            if cursor.fetchone()[0] == 0:
+
+                cursor.execute("""
+                    INSERT INTO users (
+                        username,
+                        password,
+                        name,
+                        email,
+                        role,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
                     username,
-                    password,
+                    hash_password(password),
                     name,
                     email,
                     role,
                     created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
+                ))
+
+            continue
+
+        user_id, current_email = existing
+
+        if str(
+            current_email
+        ).strip().lower() == email.strip().lower():
+
+            continue
+
+        # The demo account email has drifted from the demo
+        # resume email (older seeds stored emails that did not
+        # match the extracted resume email, so the Candidate
+        # Portal could not link the account to its screening
+        # result). Another account may already own the target
+        # email - created when the resume was screened - so
+        # swap the two emails to keep the demo username and
+        # password working, using a temporary placeholder to
+        # avoid a transient clash on the unique email index.
+        cursor.execute("""
+            SELECT id
+            FROM users
+            WHERE LOWER(email) = LOWER(?)
+        """, (
+            email,
+        ))
+
+        owner = cursor.fetchone()
+
+        if owner is not None and owner[0] != user_id:
+
+            placeholder = (
+                f"{email}.seedfix.{user_id}"
+            )
+
+            cursor.execute("""
+                UPDATE users
+                SET email = ?
+                WHERE id = ?
             """, (
-                username,
-                hash_password(password),
-                name,
+                placeholder,
+                user_id
+            ))
+
+            cursor.execute("""
+                UPDATE users
+                SET email = ?
+                WHERE id = ?
+            """, (
+                current_email,
+                owner[0]
+            ))
+
+            cursor.execute("""
+                UPDATE users
+                SET email = ?
+                WHERE id = ?
+            """, (
                 email,
-                role,
-                created_at
+                user_id
+            ))
+
+        else:
+
+            cursor.execute("""
+                UPDATE users
+                SET email = ?
+                WHERE id = ?
+            """, (
+                email,
+                user_id
             ))
 
 

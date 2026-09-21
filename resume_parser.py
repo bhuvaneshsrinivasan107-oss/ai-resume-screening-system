@@ -8,7 +8,7 @@ import tempfile
 import pdfplumber
 import pytesseract
 
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 from pypdf import PdfReader
 from docx import Document
 
@@ -65,6 +65,235 @@ def clean_text(text):
 
 
 # ============================================================
+# TEXT RELIABILITY VALIDATION
+# ============================================================
+# A PDF can contain a "text layer" that is long enough to pass a
+# simple length check but is actually corrupted or garbled (e.g. a
+# broken font encoding that maps glyphs to the wrong characters).
+# Example of such garbage: "SHLONIAYLS AA" / "SHLDNAUYLS AIX Ps".
+#
+# `is_text_reliable` decides whether extracted text actually looks
+# like readable resume content before any candidate details are
+# pulled from it. It is deliberately generic (no hardcoded special
+# cases) and combines several independent signals.
+
+
+_COMMON_ENGLISH = frozenset("""
+the a an and or for with without by at in on to of from into within
+between across through during after before about according among around
+against along other another others these those this that they them their
+there here where when which who whom what while will would can could should
+must may might shall has have had been being is are was were be do does did
+done not nor no but if as than so then also very most more less many much
+some any all each few both because since until such only own same over under
+above below up down out off we you your our its us years year month months
+day date time work worked working works project projects team company
+companies experience experienced education degree bachelor master mba btech
+diploma engineering engineer developer development developing developed
+design designing designed software hardware system systems application
+applications technology technologies technical data analysis analytics
+analyst scientist researcher management manage managed manager lead leader
+skills skill quality testing test tested support supporting customer clients
+service services business sales marketing product products operations
+processes process improvement strong good excellent proficient knowledge
+ability communicate communication written verbal interpersonal leadership
+teamwork collaboration solving analytical summary objective career
+professional academic university college school student internship
+certification certificate training responsible duties responsibilities
+including include includes using used users provide provides provided
+deliver delivering deployed deployment implemented implementing maintained
+maintaining requirements requirement specification database databases
+python sql excel word powerpoint outlook office microsoft successfully
+throughout various multiple report reports reporting candidate required
+position role assistance activities planning organization organized
+""".split())
+
+_RESUME_KEYWORDS = frozenset([
+    "experience", "education", "skills", "project", "work", "summary",
+    "objective", "contact", "email", "phone", "degree", "technical",
+    "professional", "career", "university", "computer", "data",
+    "engineering", "management", "certificate", "training",
+    "responsibilities", "company", "position", "profile",
+])
+
+
+def _count_unusual_chars(text):
+    """Count replacement / control / private-use characters."""
+    count = 0
+    for ch in text:
+        code = ord(ch)
+        if ch == "\ufffd":
+            count += 1
+        elif 0xE000 <= code <= 0xF8FF:
+            count += 1
+        elif 0xF0000 <= code <= 0xFFFFD:
+            count += 1
+        elif code < 0x20 and ch not in "\n\r\t":
+            count += 1
+    return count
+
+
+def _readable_words(text):
+    """Tokens that plausibly read as words (letters + at least one vowel)."""
+    return [
+        w for w in re.findall(r"[A-Za-z]{3,25}", text)
+        if re.search(r"[aeiouyAEIOUY]", w)
+    ]
+
+
+def _real_word_hits(text):
+    """How many distinct tokens also appear in a common-English set."""
+    tokens = {
+        w.lower()
+        for w in re.findall(r"[A-Za-z]{3,20}", text)
+    }
+    return len(tokens.intersection(_COMMON_ENGLISH))
+
+
+def _suspicious_tokens(text):
+    """Tokens that look like decoding/scrambling noise rather than words.
+
+    Catches: tokens built from almost no distinct letters, 3+ repeated
+    characters, 3+ consecutive consonants in a row, and long consonant-only
+    runs - all typical of a corrupted font map.
+    """
+    suspicious = []
+    for tok in re.findall(r"[A-Za-z]{2,}", text):
+        lower = tok.lower()
+        distinct = set(lower)
+
+        if len(distinct) <= 2 and len(tok) >= 4:
+            suspicious.append(tok)
+            continue
+
+        if re.search(r"(.)\1{2}", tok):
+            suspicious.append(tok)
+            continue
+
+        if re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}", lower):
+            suspicious.append(tok)
+            continue
+
+        if len(tok) >= 8 and not re.search(r"[aeiouy]", lower):
+            suspicious.append(tok)
+
+    return suspicious
+
+
+def is_text_reliable(text):
+    """Return True when `text` looks like readable resume content.
+
+    Combines multiple signals instead of relying on a bare length check:
+    1. Amount of alphabetic characters
+    2. Ratio of alphabetic to printable characters
+    3. Readable English word count
+    4. Suspicious/random token ratio
+    5. Replacement / unusual characters
+    6. Repetition patterns
+    7. Presence of resume keywords and contact information
+    8. Natural-language flow (multiple words)
+    """
+
+    if not text:
+        return False
+
+    text = clean_text(text)
+
+    if len(text) < 30:
+        return False
+
+    alpha = sum(1 for ch in text if ch.isalpha())
+    if alpha < 24:
+        return False
+
+    printable = sum(
+        1 for ch in text
+        if ch.isprintable() and not ch.isspace()
+    )
+    if printable and (alpha / printable) < 0.5:
+        return False
+
+    if _count_unusual_chars(text) > 0:
+        logger.info("Text rejected: contains unusual / replacement characters.")
+        return False
+
+    text_lower = text.lower()
+
+    ascii_letters = sum(
+        1 for ch in text
+        if ch.isalpha() and ord(ch) <= 127
+    )
+    non_ascii_letters = alpha - ascii_letters
+
+    # ------------------------------------------------------------
+    # Non-Latin scripts (Hindi, Arabic, CJK, ...): the ASCII English
+    # word checks do not apply. Validate structure + contact info.
+    # ------------------------------------------------------------
+    if non_ascii_letters > ascii_letters:
+        has_contact = (
+            extract_email(text) != "Not Found"
+            or extract_phone(text) != "Not Found"
+        )
+        structural = (
+            len(text) >= 60
+            and len(text.split()) >= 8
+            and (
+                has_contact
+                or len(re.findall(r"\d", text)) >= 3
+            )
+        )
+        return structural
+
+    # ------------------------------------------------------------
+    # Latin text path
+    # ------------------------------------------------------------
+
+    tokens = re.findall(r"[A-Za-z]{2,}", text)
+    if not tokens:
+        return False
+
+    suspicious = _suspicious_tokens(text)
+    suspicious_ratio = len(suspicious) / len(tokens)
+
+    if suspicious_ratio > 0.35:
+        logger.info(
+            "Text rejected: suspicious token ratio too high (%.2f).",
+            suspicious_ratio,
+        )
+        return False
+
+    readable = _readable_words(text)
+    real_hits = _real_word_hits(text)
+
+    resume_hits = sum(
+        1 for kw in _RESUME_KEYWORDS
+        if re.search(r"\b" + re.escape(kw) + r"\b", text_lower)
+    )
+
+    has_email = extract_email(text) != "Not Found"
+    has_phone = extract_phone(text) != "Not Found"
+    has_digits = len(re.findall(r"[0-9]", text)) >= 2
+    multiple_words = text.count(" ") >= 20
+
+    signals = sum([
+        1 if len(readable) >= 6 else 0,
+        1 if real_hits >= 8 else 0,
+        1 if resume_hits >= 2 else 0,
+        1 if (has_email or has_phone or has_digits) else 0,
+        1 if multiple_words else 0,
+    ])
+
+    if signals >= 3:
+        return True
+
+    logger.info(
+        "Text rejected: not enough reliability signals (%d/5).",
+        signals,
+    )
+    return False
+
+
+# ============================================================
 # EXTRACT TEXT FROM NORMAL PDF
 # ============================================================
 
@@ -89,7 +318,10 @@ def _extract_with_pymupdf(file_bytes):
 
         for page in doc:
 
-            page_text = page.get_text()
+            page_text = page.get_text(
+                "text",
+                sort=True
+            )
 
             if page_text:
 
@@ -230,77 +462,118 @@ def tesseract_available():
 def _ocrize(pil_image):
     """Preprocess a page image to improve OCR accuracy.
 
-    Converts to grayscale and boosts contrast so Tesseract
-    can read scanned resumes (which are often light with
-    normal white backgrounds) more reliably.
+    Converts to grayscale, enhances contrast and lightly denoises
+    so Tesseract can read scanned resumes more reliably. The result
+    is derived from the original image - the source is never
+    destroyed and no hard thresholding is applied (which could
+    erase light text).
     """
-    gray = pil_image.convert("L")
     try:
-        from PIL import ImageEnhance
-        gray = ImageEnhance.Contrast(gray).enhance(2.0)
-    except Exception:
-        pass
-    return gray
-
-
-def _ocr_image_best(pil_image, config=""):
-    """Run OCR on an image, trying multiple rotations if needed.
-
-    Some scanned PDFs have the page rotated 90/180/270 degrees.
-    We OCR the original plus each rotation and keep the result
-    that contains the most text.
-    """
-    best_text = ""
-    best_count = 0
-
-    candidates = [0, 180, 90, 270]
-
-    for angle in candidates:
-
+        gray = pil_image.convert("L")
+        gray = ImageOps.autocontrast(gray)
+        gray = gray.filter(ImageFilter.MedianFilter(3))
+        return gray
+    except Exception as e:
+        logger.debug("Image preprocessing failed: %s", e)
         try:
+            return pil_image.convert("L")
+        except Exception:
+            return pil_image
 
-            img = pil_image
 
-            if angle != 0:
+def _ocr_readability_score(text):
+    """Heuristic score for comparing OCR results."""
+    if not text:
+        return 0
+    tokens = re.findall(r"[A-Za-z]{3,}", text)
+    readable = [
+        t for t in tokens
+        if re.search(r"[aeiouyAEIOUY]", t)
+    ]
+    lines = [
+        ln for ln in text.splitlines()
+        if ln.strip()
+    ]
+    return len(readable) + min(len(lines), 30)
 
-                img = pil_image.rotate(
-                    angle,
-                    expand=True
-                )
 
+def _ocr_image_best(pil_image):
+    """Run OCR on an image with a sensible, bounded fallback strategy.
+
+    Fast path (the common case): OCR the image as-is with the default
+    page segmentation (psm 3) and return immediately if the output is
+    reliable. Only if that fails do we try OCR again on the rotated
+    variants (scanned pages are sometimes rotated 90/180/270 degrees)
+    and finally a --psm 6 retry on the winning rotation. This keeps the
+    number of OCR passes small instead of running every configuration.
+    """
+
+    def _run(image, angle, psm):
+        try:
+            img = (
+                image.rotate(angle, expand=True)
+                if angle
+                else image
+            )
             processed = _ocrize(img)
-
             text = pytesseract.image_to_string(
                 processed,
-                config=config
+                config=psm
             )
-
-            if text:
-
-                cleaned = clean_text(text)
-
-                # Non-blank lines roughly indicate useful content.
-                count = len(
-                    [
-                        line
-                        for line in cleaned.splitlines()
-                        if line.strip()
-                    ]
-                )
-
-                if count > best_count:
-
-                    best_count = count
-
-                    best_text = cleaned
-
+            return clean_text(text)
         except Exception as e:
-
             logger.warning(
-                "OCR rotation %s failed: %s",
+                "OCR (psm=%s angle=%s) failed: %s",
+                psm,
                 angle,
                 e,
             )
+            return ""
+
+    candidate = _run(
+        pil_image,
+        0,
+        "--psm 3"
+    )
+
+    if is_text_reliable(candidate):
+        return candidate
+
+    best_text = candidate
+    best_score = _ocr_readability_score(best_text)
+    best_angle = 0
+
+    for angle in [180, 90, 270]:
+
+        text = _run(
+            pil_image,
+            angle,
+            "--psm 3"
+        )
+
+        if is_text_reliable(text):
+            return text
+
+        score = _ocr_readability_score(text)
+
+        if score > best_score:
+
+            best_score = score
+
+            best_text = text
+
+            best_angle = angle
+
+    # A single uniform text block can be read better with psm 6.
+    psm6 = _run(
+        pil_image,
+        best_angle,
+        "--psm 6"
+    )
+
+    if _ocr_readability_score(psm6) > best_score:
+
+        return psm6
 
     return best_text
 
@@ -518,13 +791,39 @@ def extract_resume_with_result(uploaded_file):
         'unknown'
     )
 
-    def _fail(reason, action):
-        return "", {
+    def _result(
+        filename,
+        ok,
+        message="",
+        suggested_action="",
+        method="",
+        reliability="",
+        error="",
+        warnings=None
+    ):
+        return {
             "filename": filename,
-            "ok": False,
-            "message": reason,
-            "suggested_action": action,
+            "ok": ok,
+            "success": ok,
+            "message": message,
+            "suggested_action": suggested_action,
+            "method": method,
+            "reliability": reliability,
+            "error": error,
+            "warnings": warnings or [],
         }
+
+    def _fail(reason, action, method="", reliability="unreliable", warnings=None):
+        return "", _result(
+            filename,
+            False,
+            reason,
+            action,
+            method=method,
+            reliability=reliability,
+            error=reason,
+            warnings=warnings,
+        )
 
     try:
 
@@ -545,42 +844,55 @@ def extract_resume_with_result(uploaded_file):
 
         if file_name.endswith(".pdf"):
 
-            # First try normal PDF text extraction.
+            # ------------------------------------------------
+            # Step 1-2: normal extraction, then validate it.
+            # ------------------------------------------------
+
             text = extract_pdf_text(
                 file_bytes
             )
 
-            if text and len(text.strip()) >= 30:
+            cleaned = clean_text(text)
 
-                return text, {
-                    "filename": filename,
-                    "ok": True,
-                    "message": "",
-                    "suggested_action": "",
-                }
+            if is_text_reliable(cleaned):
 
-            # Otherwise attempt OCR.
-            logger.info(
-                "Normal PDF extraction yielded insufficient text "
-                "for '%s'. Trying OCR...",
-                filename,
-            )
+                return cleaned, _result(
+                    filename,
+                    True,
+                    method="pdf",
+                    reliability="reliable",
+                )
 
-            ocr_text = extract_pdf_with_ocr(
-                file_bytes
-            )
+            if cleaned:
 
-            if ocr_text and ocr_text.strip():
+                logger.warning(
+                    "Normal PDF extraction for '%s' produced text "
+                    "but it failed reliability validation (%d chars). "
+                    "Falling back to OCR.",
+                    filename,
+                    len(cleaned),
+                )
 
-                return ocr_text, {
-                    "filename": filename,
-                    "ok": True,
-                    "message": "",
-                    "suggested_action": "",
-                }
+            else:
 
-            # Determine a helpful reason based on environment.
+                logger.info(
+                    "Normal PDF extraction for '%s' yielded no "
+                    "useful text. Falling back to OCR.",
+                    filename,
+                )
+
+            # ------------------------------------------------
+            # Step 3-4: OCR fallback, then validate OCR output.
+            # ------------------------------------------------
+
             if not tesseract_available():
+
+                logger.warning(
+                    "OCR requested for '%s' but Tesseract binary is "
+                    "unavailable (found: %s).",
+                    filename,
+                    TESSERACT_PATH or "none",
+                )
 
                 return _fail(
                     "OCR engine (Tesseract) is not available on "
@@ -588,6 +900,57 @@ def extract_resume_with_result(uploaded_file):
                     "not be read.",
                     "The server needs tesseract-ocr installed. "
                     "The Docker deployment installs it automatically.",
+                    method="ocr (tesseract)",
+                    warnings=["Tesseract binary not found on server."],
+                )
+
+            logger.info(
+                "Starting OCR for '%s'.",
+                filename,
+            )
+
+            ocr_text = extract_pdf_with_ocr(
+                file_bytes
+            )
+
+            ocr_cleaned = clean_text(ocr_text)
+
+            if is_text_reliable(ocr_cleaned):
+
+                logger.info(
+                    "OCR extraction for '%s' produced reliable text.",
+                    filename,
+                )
+
+                return ocr_cleaned, _result(
+                    filename,
+                    True,
+                    method="ocr (tesseract)",
+                    reliability="reliable",
+                )
+
+            if ocr_cleaned:
+
+                logger.warning(
+                    "OCR output for '%s' failed reliability "
+                    "validation (%d chars). Extraction rejected "
+                    "rather than saving garbled text.",
+                    filename,
+                    len(ocr_cleaned),
+                )
+
+                return _fail(
+                    "The PDF text layer is corrupted/unreadable. "
+                    "OCR was attempted automatically, but its "
+                    "result was still unreadable, so no candidate "
+                    "data could be extracted.",
+                    "Try a clearer scan of the resume, or upload "
+                    "it as DOCX/TXT.",
+                    method="ocr (tesseract)",
+                    warnings=[
+                        "Normal PDF text and OCR output both "
+                        "failed the readability check."
+                    ],
                 )
 
             return _fail(
@@ -595,6 +958,8 @@ def extract_resume_with_result(uploaded_file):
                 "OCR could not extract any either.",
                 "The PDF may be corrupted or contain an unsupported "
                 "image format. Try a clearer scan.",
+                method="pdf + ocr",
+                warnings=["OCR produced no usable text."],
             )
 
         # ----------------------------------------------------
@@ -609,16 +974,17 @@ def extract_resume_with_result(uploaded_file):
 
             if docx_text:
 
-                return docx_text, {
-                    "filename": filename,
-                    "ok": True,
-                    "message": "",
-                    "suggested_action": "",
-                }
+                return docx_text, _result(
+                    filename,
+                    True,
+                    method="docx",
+                    reliability="reliable",
+                )
 
             return _fail(
                 "This DOCX document did not yield any readable text.",
                 "The document may be empty or password-protected.",
+                method="docx",
             )
 
         # ----------------------------------------------------
@@ -638,20 +1004,31 @@ def extract_resume_with_result(uploaded_file):
 
                 if txt_text:
 
-                    return txt_text, {
-                        "filename": filename,
-                        "ok": True,
-                        "message": "",
-                        "suggested_action": "",
-                    }
+                    return txt_text, _result(
+                        filename,
+                        True,
+                        method="txt",
+                        reliability="reliable",
+                    )
 
-            except Exception:
+                logger.warning(
+                    "TXT extraction for '%s' produced no readable "
+                    "content.",
+                    filename,
+                )
 
-                pass
+            except Exception as e:
+
+                logger.warning(
+                    "TXT decoding failed for '%s': %s",
+                    filename,
+                    e,
+                )
 
             return _fail(
                 "This text file yielded no readable content.",
                 "The file may be empty.",
+                method="txt",
             )
 
         # ----------------------------------------------------
@@ -825,6 +1202,39 @@ def _looks_like_name_word(word):
     return False
 
 
+def _is_garbled_word(word):
+    """Generic guard against treating decoding/OCR noise as a name word.
+
+    Flags tokens that look like output from a corrupted font map or
+    OCR garbage: almost no distinct letters, tripled characters, long
+    consecutive-consonant runs, or long vowel-less tokens. It is generic
+    (no hardcoded resume names) so real human names pass untouched.
+    """
+    if not word or len(word) < 2:
+        return False
+
+    if len(word) == 2:
+        return False
+
+    lower = word.lower()
+
+    distinct = set(lower)
+
+    if len(distinct) <= 2 and len(word) >= 4:
+        return True
+
+    if re.search(r"(.)\1{2}", word):
+        return True
+
+    if re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}", lower):
+        return True
+
+    if len(word) >= 8 and not re.search(r"[aeiouy]", lower):
+        return True
+
+    return False
+
+
 def _is_valid_name(name):
     """Check if a name looks like a real person name."""
     if not name or len(name) < 3:
@@ -838,6 +1248,8 @@ def _is_valid_name(name):
         if not word[0].isupper():
             return False
         if len(word) > 12:
+            return False
+        if _is_garbled_word(word):
             return False
     return True
 
@@ -953,9 +1365,13 @@ def extract_name(text, filename=""):
                     for word in words
                 ):
                     if all(
-                        len(word) >= 2 for word in words
+                        not _is_garbled_word(word)
+                        for word in words
                     ):
-                        return clean_line
+                        if all(
+                            len(word) >= 2 for word in words
+                        ):
+                            return clean_line
 
     # --------------------------------------------------------
     # Strategy 4: Filename
@@ -1404,8 +1820,12 @@ def extract_candidate_details(
                                 for s in raw
                                 if s and s.strip()
                             ]
-        except Exception:
-            pass
+        except Exception as e:
+
+            logger.warning(
+                "Gemini fallback extraction failed: %s",
+                e,
+            )
 
     return {
 
