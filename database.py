@@ -319,7 +319,8 @@ def create_database():
 
             uploaded_by TEXT DEFAULT '',
 
-            uploaded_at TEXT DEFAULT ''
+            uploaded_at TEXT DEFAULT '',
+            company_name TEXT DEFAULT ''
 
         )
     """)
@@ -530,7 +531,8 @@ def create_database():
 
         "uploaded_by": "TEXT DEFAULT ''",
 
-        "uploaded_at": "TEXT DEFAULT ''"
+        "uploaded_at": "TEXT DEFAULT ''",
+        "company_name": "TEXT DEFAULT ''"
     }
 
     for column, definition in required_columns.items():
@@ -645,7 +647,8 @@ def add_candidate(
     job_role,
     matched_skills,
     missing_skills,
-    uploaded_by="recruiter"
+    uploaded_by="recruiter",
+    company_name=""
 ):
 
     conn = get_connection()
@@ -655,6 +658,10 @@ def add_candidate(
     uploaded_at = datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
     )
+
+    # Ensure company_name is string, never None
+    if company_name is None:
+        company_name = ""
 
     cursor.execute("""
         INSERT INTO candidates (
@@ -671,11 +678,12 @@ def add_candidate(
             matched_skills,
             missing_skills,
             uploaded_by,
-            uploaded_at
+            uploaded_at,
+            company_name
 
         )
 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
 
         candidate.get(
@@ -723,7 +731,8 @@ def add_candidate(
 
         uploaded_by,
 
-        uploaded_at
+        uploaded_at,
+        str(company_name)
     ))
 
     candidate_id = cursor.lastrowid
@@ -774,7 +783,8 @@ def get_candidates():
             matched_skills,
             missing_skills,
             uploaded_by,
-            uploaded_at
+            uploaded_at,
+            company_name
         FROM candidates
         ORDER BY score DESC
     """

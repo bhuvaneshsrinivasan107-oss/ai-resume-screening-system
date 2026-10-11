@@ -1142,7 +1142,8 @@ def show_metrics(df):
 
 def save_job_context(
     job_role,
-    job_description
+    job_description,
+    company_name=""
 ):
 
     st.session_state[
@@ -1152,6 +1153,10 @@ def save_job_context(
     st.session_state[
         "current_job_description"
     ] = job_description
+
+    st.session_state[
+        "current_company_name"
+    ] = company_name or ""
 
 
 # ============================================================
@@ -1181,14 +1186,17 @@ def resume_screening():
     col1, col2 = st.columns(2)
 
     with col1:
-
+        company_name = st.text_input(
+            "🏢 Company Name",
+            placeholder="Example: ABC Technologies",
+            value=st.session_state.get("current_company_name", "")
+        )
         job_role = st.text_input(
             "💼 Job Role",
             placeholder="Example: Data Analyst"
         )
 
     with col2:
-
         uploaded_files = st.file_uploader(
             "📎 Upload Resumes",
             type=[
@@ -1243,9 +1251,11 @@ def resume_screening():
         # SAVE JOB DESCRIPTION FOR GEMINI
         # ----------------------------------------------------
 
+        st.session_state["current_company_name"] = company_name
         save_job_context(
             job_role,
-            job_description
+            job_description,
+            company_name
         )
 
         results = []
@@ -1438,7 +1448,8 @@ def resume_screening():
                     status=status,
                     job_role=job_role,
                     matched_skills=matched_skills,
-                    missing_skills=missing_skills
+                    missing_skills=missing_skills,
+                    company_name=st.session_state.get("current_company_name", "")
                 )
 
                 results.append(
@@ -2450,9 +2461,18 @@ def candidate_portal():
 
             for _, row in email_matches.iterrows():
 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
 
                 with col1:
+                    company_name_val = row.get("company_name") or row.get("company") or ""
+                    if not company_name_val:
+                        company_name_val = "Not Available"
+                    st.metric(
+                        "Company",
+                        company_name_val
+                    )
+
+                with col2:
 
                     st.metric(
                         "Job Role",
@@ -2462,14 +2482,14 @@ def candidate_portal():
                         )
                     )
 
-                with col2:
+                with col3:
 
                     st.metric(
                         "AI Match Score",
                         f"{float(row.get('score', 0)):.1f}%"
                     )
 
-                with col3:
+                with col4:
 
                     status = row.get(
                         "status",
